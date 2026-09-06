@@ -1,0 +1,47 @@
+# GPU 서버 경로 정의 — 한 번 source 하면 이후 명령이 짧아진다.
+#
+#   source ~/khs/wh/paths.sh
+#
+# 스크립트들이 전부 환경변수를 먼저 보므로, 폴더를 옮겨도 이 파일만 고치면 된다.
+# (하드코딩된 경로를 서버에서 손으로 고치다가 기능이 통째로 빠진 판이 남은 적이
+#  있다 — 2026-09-04. 그래서 경로는 한 곳에 모은다.)
+
+export W=$HOME/khs/wh
+
+# --- 입력 자산 (보존. 다시 만들려면 팀 저장소에서 받아야 한다) ---
+export WAREHOUSE=$W/warehouse
+export SCENE=$WAREHOUSE/scene/warehouse_scene.usd    # 팀 T3 창고 원본
+export MAP=$WAREHOUSE/map                            # v5.9 계획용 맵 (기본)
+export MAP_FMS=$WAREHOUSE/map_fms                    # FMS 공식 맵 (9/4)
+export ROBOT=$WAREHOUSE/robots/iwhub/iw_hub.usd      # iw.hub 에셋
+
+# --- 파생물 (지워도 된다. 빌드로 다시 만들어진다) ---
+export STAGE=$W/stage                                # 빌드된 씬 USD
+export PLAN=$W/plan                                  # 궤적 (계획 산출물, 로컬에서 옴)
+
+# --- 결과 ---
+export OUT=$W/out                                    # kpi · trace · rec · video
+export LOGS=$W/logs
+
+# --- 실행·계획 모듈 ---
+#   amr_driver_v2.py · pibt_core_v2.py · isaac_drive.py · pibt_scene.py 가
+#   $W/path/ 에 있다. 러너는 BASE 와 BASE/path 를 모두 sys.path 에 넣으므로
+#   AMR_BASE 는 그 부모(=W)를 가리키면 된다.
+export AMR_BASE=$W
+export MODS=$W/path
+
+# --- 스트리밍 ---
+export LAN_IP=$(hostname -I | awk '{print $1}')
+export GPU=${GPU:-3}
+
+mkdir -p "$STAGE" "$PLAN" "$OUT" "$LOGS"
+
+echo "W=$W"
+echo "  입력  SCENE=$(basename $SCENE)  MAP=$(basename $MAP)  ROBOT=$(basename $ROBOT)"
+echo "  파생  STAGE=$STAGE"
+echo "  계획  PLAN=$PLAN"
+echo "  결과  OUT=$OUT  LOGS=$LOGS"
+echo "  LAN=$LAN_IP  GPU=$GPU"
+for f in "$SCENE" "$ROBOT" "$MAP/obstacle_mask.npy"; do
+    [ -e "$f" ] || echo "  ★ 없음: $f"
+done
