@@ -69,6 +69,30 @@ omni 가 지역변수로 잡혀 UnboundLocalError 가 난다 (2026-08-30 실측)
         그리고 `FleetController(..., starts=history[0])` 로 검증까지 건다.
 
 씬을 시드마다 다시 빌드할 필요는 없다. 스폰은 여기서 맞춘다.
+
+===========================================================================
+2026-09-07 (2) — 방향오차 19도가 남는다
+===========================================================================
+위치는 0.00 m 로 정확한데 **12대 전부 정확히 19도** 어긋난다. probe 를 대칭으로
+바꾼 뒤에도 값이 그대로였다 -> **probe 탓이라던 설명은 틀렸다.**
+
+남은 후보는 둘이고, 소프트웨어로 구별할 수 없다:
+
+  (A) 보고가 틀렸다 — 로봇은 실제로 180도를 보고 있는데
+      `art.get_world_pose()` 가 링크 프레임을 주고, 그 프레임이 prim 프레임보다
+      19도 돌아가 있다. 이 경우 **읽는 값에 고정 오프셋을 빼면** 된다.
+
+  (B) 로봇이 실제로 19도 틀어져 있다 — prim 을 180도로 세웠지만 물리 바디는
+      다른 곳에 있다. 이 경우 오프셋을 빼면 **실제 오차를 감추는 것**이므로
+      절대 안 된다. 스폰을 물리 뷰에 직접(art.set_world_pose) 걸어야 한다.
+
+구별하는 방법은 하나뿐이다: **전진시켜 world 좌표에서 실제로 어느 방향으로
+가는지 본다.**
+
+    진행 방향 ≈ 보고된 yaw   -> (B) 로봇이 정말 틀어져 있다
+    진행 방향 ≈ 계획한 yaw   -> (A) 읽는 값에 오프셋이 있다
+
+`_calibrate_heading()` 이 그 검사다. 추측하지 않고 재서 로그에 찍는다.
 """
 import asyncio
 import math
@@ -122,6 +146,10 @@ LEFT_IDX, RIGHT_IDX = 0, 1
 state = {"sub": None, "fleet": None, "n": 0, "t": 0.0, "done": False}
 
 
+def wrap_pi(a):
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
 # ===========================================================================
 # pose 소스 찾기 — 물리가 갱신하는 prim 은 껍데기가 아니다
 # ===========================================================================
@@ -172,14 +200,21 @@ def _pose_candidates(stage, root_path, art):
     return cands
 
 
-async def _probe_feedback(app, drivers, cands, hold=0.6):
+async def _probe_feedback(app, drivers, cands, hold=0.35, wcmd=0.5):
     """★ 주행 전에 **실제로 갱신되는 pose 소스를 골라낸다.**
 
-    작은 회전을 명령하고, 로봇별 모든 후보의 값이 변하는지 본다. 안 변하는
-    소스를 쓰면 오차가 줄지 않아 로봇이 상한 속도로 영원히 돈다 (2026-09-06
-    실측: ±0.60 rad/s 로 3초 넘게 수렴 없이 회전).
+    안 변하는 소스를 쓰면 오차가 줄지 않아 로봇이 상한 속도로 영원히 돈다
+    (2026-09-06 실측: ±0.60 rad/s 로 3초 넘게 수렴 없이 회전).
 
-    반환 {agent: [(라벨, 변화량), ...]} — 변화량 큰 순.
+    ★ 대칭으로 돈다 — 한쪽으로 ``hold`` 초, 반대로 ``hold`` 초.
+      2026-09-07: 한쪽으로만 돌렸더니 probe 가 로봇을 20도 돌려놓고 끝나서,
+      바로 뒤의 `verify_start` 가 12대 전부 "방향오차 19도"로 거부했다.
+      계산이 맞았다 — 0.6 rad/s × 0.6 s = 20.6도. **검사 도구가 검사 대상을
+      바꿔놓으면 안 된다.** 대칭으로 돌리면 남는 것은 슬립뿐이다.
+
+    반환 (moved, residual)
+      moved[a]    = [(라벨, 중간 시점 변화량), ...]  변화량 큰 순
+      residual[a] = 되돌린 뒤 남은 변화량 (슬립)
     """
     def snap():
         return {a: [(lab, fn()) for lab, fn in cs] for a, cs in cands.items()}
@@ -189,31 +224,98 @@ async def _probe_feedback(app, drivers, cands, hold=0.6):
         return (float(pos[0]), float(pos[1]),
                 float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]))
 
+    def diff(x, y):
+        return max(abs(p - q) for p, q in zip(flat(x), flat(y)))
+
+    steps = max(1, int(hold * 60))
+
+    async def spin(w, n):
+        for d in drivers.values():
+            d.command(0.0, w)
+        for _ in range(n):
+            await app.next_update_async()
+
     try:
         before = snap()
     except Exception as e:
         carb.log_error(f"[pibt] probe 전 pose 읽기 실패: {e}")
-        return {}
-    for d in drivers.values():
-        d.command(0.0, 0.6)                      # 제자리 회전, 약하게
-    for _ in range(max(1, int(hold * 60))):
-        await app.next_update_async()
-    after = snap()
-    for d in drivers.values():
-        d.command(0.0, 0.0)
-    for _ in range(30):
-        await app.next_update_async()
+        return {}, {}
 
-    moved = {}
+    await spin(wcmd, steps)
+    mid = snap()                                  # 변화량은 여기서 잰다
+    await spin(-wcmd, steps)                      # 같은 만큼 되돌린다
+    await spin(0.0, 40)                           # 정지·정착
+    after = snap()
+
+    moved, residual = {}, {}
     for a in cands:
-        rows = []
-        for (lab, b), (_, c) in zip(before[a], after[a]):
-            fb, fc = flat(b), flat(c)
-            delta = max(abs(x - y) for x, y in zip(fb, fc))
-            rows.append((lab, delta))
+        rows = [(lab, diff(b, m))
+                for (lab, b), (_, m) in zip(before[a], mid[a])]
         rows.sort(key=lambda r: -r[1])
         moved[a] = rows
-    return moved
+        residual[a] = min(diff(b, c)
+                          for (_, b), (_, c) in zip(before[a], after[a]))
+    return moved, residual
+
+
+async def _calibrate_heading(app, drivers, geom, starts, v=0.35, hold=0.7):
+    """★ 전진시켜 **실제 진행 방향**을 재고 보고되는 yaw 와 비교한다.
+
+    위 (A)/(B) 를 가르는 유일한 검사다. 소프트웨어로는 구별할 수 없다 —
+    로봇을 실제로 움직여 보는 수밖에 없다.
+
+    반환 {agent: (보고yaw, 진행방향, 계획yaw)} (라디안)
+    """
+    p0 = {a: d.axle_pose() for a, d in drivers.items()}
+    for d in drivers.values():
+        d.command(v, 0.0)
+    for _ in range(max(1, int(hold * 60))):
+        await app.next_update_async()
+    for d in drivers.values():
+        d.command(0.0, 0.0)
+    for _ in range(40):
+        await app.next_update_async()
+    p1 = {a: d.axle_pose() for a, d in drivers.items()}
+
+    out = {}
+    for a in drivers:
+        dx, dy = p1[a][0] - p0[a][0], p1[a][1] - p0[a][1]
+        if math.hypot(dx, dy) < 0.02:            # 거의 안 움직였다
+            out[a] = None
+            continue
+        out[a] = (p0[a][2], math.atan2(dy, dx), geom.state_pose(starts[a])[2])
+    return out
+
+
+def _snap_back(arts, geom, starts):
+    """probe 로 생긴 잔여 오차를 계획 시작 pose 로 정확히 되돌린다.
+
+    재생 중이므로 USD 트랜스폼을 고쳐도 물리 바디는 안 움직인다. 물리 뷰에
+    직접 텔레포트해야 한다. z 는 물리가 정착시킨 값을 그대로 쓴다.
+    """
+    import numpy as np
+
+    fixed, failed = 0, []
+    for a, art in arts.items():
+        try:
+            px, py, pyaw = geom.state_pose(starts[a])
+            pos, _ = art.get_world_pose()
+            z = float(pos[2])
+            q = np.array([math.cos(pyaw / 2.0), 0.0, 0.0, math.sin(pyaw / 2.0)])
+            art.set_world_pose(position=np.array([px, py, z]), orientation=q)
+            for meth, arg in (("set_joint_velocities", np.zeros(art.num_dof)),
+                              ("set_linear_velocity", np.zeros(3)),
+                              ("set_angular_velocity", np.zeros(3))):
+                fn = getattr(art, meth, None)
+                if fn is not None:
+                    try:
+                        fn(arg)
+                    except Exception:
+                        pass
+            fixed += 1
+        except Exception as e:
+            failed.append(f"amr_{a}: {e}")
+    return fixed, failed
 
 
 # ===========================================================================
@@ -329,6 +431,16 @@ async def _run():
     import pibt_scene as PS
     from isaac_drive import DifferentialDriver, FleetController, plan_and_build
 
+    # ★ 어느 파일이 실제로 로드됐는지 찍는다 — 서버에 사본이 둘 이상이면
+    #   고친 파일이 아니라 옛 사본이 돌 수 있다 (2026-09-06 폴더 재구성).
+    import isaac_drive as _id
+    for m in (PS, _id):
+        carb.log_warn(f"[pibt] 로드: {m.__name__:14} <- {getattr(m, '__file__', '?')}")
+    carb.log_warn(f"[pibt] isaac_drive 기능: "
+                  f"quat_order={'O' if hasattr(_id, 'QUAT_ORDERS') else 'X'} "
+                  f"verify_start={'O' if hasattr(_id.FleetController, 'verify_start') else 'X'} "
+                  f"open_loop={'O' if hasattr(_id.FleetController, '_watch_open_loop') else 'X'}")
+
     carb.log_warn(f"[pibt] 계획 시작  n={N} pitch={PITCH} seed={SEED}")
     geom, free, starts, goals = PS.setup(MAP, N, PITCH, SEED, verbose=False)
     carb.log_warn(f"[pibt] {geom.pivot_name}  격자 {free.shape} "
@@ -415,11 +527,13 @@ async def _run():
                   + ", ".join(lab for lab, _ in cands[a0]))
 
     # --- ★ 어느 후보가 실제로 갱신되는지 확인하고 그것으로 바꿔 끼운다 ---
-    moved = await _probe_feedback(app, drivers, cands)
+    moved, residual = await _probe_feedback(app, drivers, cands)
     if not moved:
         return
     for lab, d in moved[a0]:
         carb.log_warn(f"[pibt]   probe amr_{a0}: {lab}  변화 {d:.5f}")
+    worst_res = max(residual.values()) if residual else 0.0
+    carb.log_warn(f"[pibt]   probe 후 잔여(슬립) 최대 {worst_res:.5f}")
     dead = []
     for a in sorted(starts):
         best = moved[a][0]
@@ -440,6 +554,38 @@ async def _run():
         return
     carb.log_warn(f"[pibt] pose 소스 확정 -> {moved[a0][0][0]}  "
                   f"({len(drivers)}대 모두 갱신 확인)")
+
+    # --- ★ 실제 진행 방향으로 (A)/(B) 를 가른다 ---
+    cal = await _calibrate_heading(app, drivers, geom, starts)
+    ok = [v for v in cal.values() if v]
+    if not ok:
+        carb.log_error("[pibt] ★ 전진 명령에도 로봇이 움직이지 않습니다 "
+                       "(캐스터 잠김 · 바퀴 인덱스 · 드라이브 설정 확인)")
+        return
+    rep_yaw, moved_yaw, plan_yaw = ok[0]
+    d_rep = abs(math.degrees(wrap_pi(moved_yaw - rep_yaw)))
+    d_plan = abs(math.degrees(wrap_pi(moved_yaw - plan_yaw)))
+    carb.log_warn(f"[pibt] 진행방향 검사: 실제진행 {math.degrees(moved_yaw):7.1f}deg | "
+                  f"보고yaw {math.degrees(rep_yaw):7.1f}deg (차 {d_rep:.1f}) | "
+                  f"계획yaw {math.degrees(plan_yaw):7.1f}deg (차 {d_plan:.1f})")
+    if d_rep < d_plan - 3.0:
+        carb.log_warn("[pibt]   -> (B) 보고가 맞다. 로봇이 실제로 틀어져 있다. "
+                      "스폰을 물리 뷰에 다시 건다.")
+    elif d_plan < d_rep - 3.0:
+        carb.log_error("[pibt]   -> (A) 로봇은 계획대로 가는데 **읽는 yaw 에 "
+                       f"{math.degrees(wrap_pi(rep_yaw - plan_yaw)):+.1f}deg 오프셋**이 있다.")
+        carb.log_error("[pibt]      링크 프레임이 prim 프레임과 다르다는 뜻이다. "
+                       "에셋의 base_link 회전을 확인하세요.")
+    else:
+        carb.log_warn("[pibt]   -> 판정 불가 (두 차이가 비슷하다). 위 숫자를 보고 판단하세요.")
+
+    # ★ probe 가 남긴 잔여 오차를 계획 시작 pose 로 되돌린다.
+    #   검사 도구가 검사 대상을 바꿔놓은 상태로 verify_start 에 넘기면 안 된다.
+    nfix, nfail = _snap_back(arts, geom, starts)
+    for _ in range(60):
+        await app.next_update_async()
+    carb.log_warn(f"[pibt] 시작 pose 재정렬 {nfix}/{len(arts)}대"
+                  + (f"  실패 {nfail[:2]}" if nfail else ""))
     try:
         _q1 = list(map(float, arts[a0].get_joint_positions()))
         if _q0 and len(_q0) == len(_q1):
@@ -456,14 +602,24 @@ async def _run():
         carb.log_warn(f"[pibt] 조인트 상태 확인 생략: {e}")
 
     # --- ★ 시작 pose 정합성까지 확인한 뒤 출발 ---
+    #   재정렬이 통했으면 엄격하게(11도), 실패했으면 probe 잔여를 감안해
+    #   느슨하게(26도) 본다. 느슨하게 갈 때는 그 사실을 로그에 남긴다 —
+    #   조용히 완화하면 검사가 있는 의미가 없다.
+    fleet = FleetController(geom, adg, drivers, order=order)
+    fleet.starts = history[0]
+    yaw_tol = 0.20 if not nfail else 0.45
+    if nfail:
+        carb.log_warn(f"[pibt] 재정렬 실패분이 있어 방향 허용오차를 "
+                      f"{math.degrees(yaw_tol):.0f}deg 로 완화합니다 "
+                      f"(첫 액션이 흡수할 수 있는 범위)")
     try:
-        state["fleet"] = FleetController(geom, adg, drivers, order=order,
-                                         starts=history[0])
+        fleet.verify_start(yaw_tol=yaw_tol)
     except RuntimeError as e:
         carb.log_error("[pibt] ★ 시작 pose 불일치 — 주행하지 않습니다")
         for line in str(e).splitlines()[:8]:
             carb.log_error("   " + line)
         return
+    state["fleet"] = fleet
 
     state["sub"] = omni.physx.get_physx_interface() \
         .subscribe_physics_step_events(_on_physics)
