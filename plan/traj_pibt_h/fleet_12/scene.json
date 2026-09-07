@@ -1,8 +1,8 @@
 {
  "n": 12,
  "pitch": 1.2,
- "seed": 5,
+ "seed": 9,
  "pool": "cross",
- "map": "C:\\Users\\SSAFY\\workspace\\santa\\isaacsim\\v2\\upstream\\2_Simulation\\t3_warehouse_map\\map",
+ "map": "C:\\Users\\SSAFY\\workspace\\santa\\Santa\\warehouse\\map_fms",
  "heading_offset": 0
 }

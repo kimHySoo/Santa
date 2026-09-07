@@ -181,6 +181,8 @@ W_AVOID_CROSS = True
 # x ∈ [c-1.4, c+1.6) 이다. 행 47~67 은 y ∈ [47, 68).
 #
 # **FMS 를 고치면 여기도 같이 고칠 것.**
+# 0.1 m 원본 셀값 중 장애물. FMS map_loader.OBSTACLE_VALUES 와 같아야 한다.
+OBSTACLE_VALUES = (1, 2, 5, 6)
 AISLE_BLOCK = True                 # 기본 켬. 끄려면 로더에 aisle_block=False
 AISLE_Y = (47.0, 68.0)             # [m) 행 범위
 AISLE_N = 11                       # 통로 개수

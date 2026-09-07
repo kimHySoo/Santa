@@ -134,8 +134,27 @@ def build_free(map_dir, pitch, mode="cross"):
     k = round(pitch / 0.1)
     if abs(k * 0.1 - pitch) > 1e-9:
         raise SystemExit(f"pitch 는 0.1 m 의 배수여야 합니다: {pitch}")
-    mask = np.load(_pick(map_dir, "obstacle_mask.npy",
-                         "obstacle_mask_wallA.npy")).astype(bool)
+    # ★ 팽창 마스크가 아니라 **원본 격자**를 쓴다 (2026-09-07, FMS 정렬)
+    #
+    #   obstacle_mask.npy 는 로봇 반경 0.8 m 로 이미 팽창돼 있다. 그런데 헤딩 모델은
+    #   차체를 **2칸 점유 + 스윙 3칸**으로 직접 표현한다. 팽창 마스크를 쓰면 차체를
+    #   두 번 세는 셈이라 3 m 통로가 통째로 막힌다.
+    #
+    #   실측 (FMS 공식 맵, pitch 1.2, 통로차단 ON):
+    #       팽창 마스크   성분 32개, 스테이션 36곳   packing·consol·inbound 도달 불가
+    #       원본 격자     성분 35개, 스테이션 51곳   전 카테고리 도달 가능
+    #   앞의 것으로는 out 태스크를 집어도 내려놓을 곳이 없어 완료가 0 이었다.
+    #
+    #   FMS map_loader.load_map 도 같다 — `np.isin(grid01, OBSTACLE_VALUES)` 를
+    #   max pooling 한다. 팽창은 안 쓴다.
+    src = _pick(map_dir, "occupancy_grid.npy", "obstacle_mask.npy",
+                "obstacle_mask_wallA.npy")
+    g = np.load(src)
+    if os.path.basename(src) == "occupancy_grid.npy":
+        vals = getattr(_CFG, "OBSTACLE_VALUES", (1, 2, 5, 6)) if _CFG else (1, 2, 5, 6)
+        mask = np.isin(g, vals)
+    else:                                    # 원본이 없으면 팽창본으로라도 (경고)
+        mask = g.astype(bool)
     if _CFG is not None and getattr(_CFG, "AISLE_BLOCK", False):
         mask = _CFG.apply_aisle_block(mask.copy())
     R, C = mask.shape
@@ -149,6 +168,63 @@ def build_free(map_dir, pitch, mode="cross"):
     row_ok = blocks[:, mid, :, :].all(axis=2)      # 중앙 행 전체
     col_ok = blocks[:, :, :, mid].all(axis=1)      # 중앙 열 전체
     return row_ok & col_ok, k
+
+
+def keep_station_component(free, geom, map_dir):
+    """**스테이션이 가장 많이 붙은** 4연결 성분만 남긴다.
+
+    [왜 필요한가]
+    1.2 m 격자를 cross 풀링으로 만들면 창고 바깥 둘레·설비 틈새 같은 자투리가
+    통행가능으로 남아 그래프가 **조각난다.** 실측 (2026-09-07, FMS 공식 맵):
+
+        성분 32개, 상위 [3175, 1186, 350, 217, 35]   ← 최대 성분이 전체의 62%
+
+    로봇과 목표가 서로 다른 조각에 배정되면 PIBT 는 영원히 못 간다. 24시드가
+    전부 정체한 원인이 이것이었다 — 알고리즘이 아니라 **격자 전처리**다.
+
+    WPPL 쪽 `lattice.interior()` 가 하는 일과 같다. FMS `load_map` 은 1 m
+    max pooling 이라 애초에 이 문제가 없다.
+    """
+    R, C = free.shape
+    comp = -np.ones(free.shape, dtype=np.int32)
+    groups = []
+    for r0 in range(R):
+        for c0 in range(C):
+            if not free[r0, c0] or comp[r0, c0] >= 0:
+                continue
+            cid = len(groups)
+            stack, cells = [(r0, c0)], []
+            comp[r0, c0] = cid
+            while stack:
+                r, c = stack.pop()
+                cells.append((r, c))
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    rr, cc = r + dr, c + dc
+                    if 0 <= rr < R and 0 <= cc < C and free[rr, cc] and comp[rr, cc] < 0:
+                        comp[rr, cc] = cid
+                        stack.append((rr, cc))
+            groups.append(cells)
+
+    # 스테이션이 가장 많이 닿는 성분을 실내로 본다. **크기로 고르면 안 된다** —
+    # 창고 바깥 둘레가 실내보다 큰 성분이 되는 경우가 있다 (2026-09-07 실측:
+    # 최대 성분 3175칸을 남겼더니 스테이션이 하나도 안 들어와 전 시드 정체).
+    hit = {}
+    for pts in load_stations(map_dir).values():
+        if not isinstance(pts, list):
+            continue
+        for p in pts:
+            if not (isinstance(p, (list, tuple)) and len(p) == 2):
+                continue
+            r, c = _cell_of(geom, p[0], p[1])
+            if 0 <= r < R and 0 <= c < C and comp[r, c] >= 0:
+                hit[comp[r, c]] = hit.get(comp[r, c], 0) + 1
+    if not hit:
+        raise SystemExit("★ 어느 성분에도 스테이션이 없습니다 — 격자/좌표계 확인")
+    cid = max(hit, key=hit.get)
+    out = np.zeros_like(free)
+    for r, c in groups[cid]:
+        out[r, c] = True
+    return out, len(groups), hit[cid]
 
 
 def load_stations(map_dir):
@@ -168,6 +244,36 @@ def _first_valid_heading(free, cell, prefer=None):
         if valid_state(free, (cell[0], cell[1], h)):
             return h
     return None
+
+
+def station_cells(free, geom, map_dir, cats=None):
+    """{카테고리: [(r,c)...]} — lifelong 스트림이 목표를 뽑을 후보.
+
+    `free` 밖이거나 valid 한 헤딩이 하나도 없는 칸은 뺀다. 못 서는 자리를
+    목표로 주면 배차가 영원히 안 끝난다.
+    """
+    out = {}
+    R, C = free.shape
+    for cat, pts in load_stations(map_dir).items():
+        if not isinstance(pts, list):
+            continue
+        keep = []
+        for p in pts:
+            if not (isinstance(p, (list, tuple)) and len(p) == 2):
+                continue
+            r, c = _cell_of(geom, p[0], p[1])
+            if not (0 <= r < R and 0 <= c < C):
+                continue
+            if not free[r, c]:
+                rc = _nearest_free(free, (r, c), set())
+                if rc is None:
+                    continue
+                r, c = rc
+            if _first_valid_heading(free, (r, c)) is not None and (r, c) not in keep:
+                keep.append((r, c))
+        if keep and (cats is None or cat in cats):
+            out[cat] = keep
+    return out
 
 
 def pick_start_goal(free, geom, n, map_dir, seed=0, verbose=True):
@@ -285,10 +391,63 @@ def traj_json(geom, history, pitch):
         "note": "시간표는 명목값. 실제 주행은 live_pibt.py 의 ADG 가 순서로만 제어한다."}}
 
 
+def pick_starts(free, geom, n, verbose=True):
+    """충전존 n칸에 로봇을 세운다. **목표는 뽑지 않는다** — lifelong 은 배차가 준다."""
+    H, W = free.shape
+    starts, used = {}, set()
+    for i, (x, y) in enumerate(CHARGE_ZONE[:n]):
+        cell = _cell_of(geom, x, y)
+        if cell in used or not (0 <= cell[0] < H and 0 <= cell[1] < W) or not free[cell]:
+            cell = _nearest_free(free, _cell_of(geom, x, y), used)
+        if cell is None:
+            raise SystemExit(f"충전존 {i} 에 배정할 칸이 없습니다.")
+        h = _first_valid_heading(free, cell, prefer=[3, 0, 2, 1])
+        if h is None:
+            cell2 = _nearest_free(free, cell, used)
+            h = _first_valid_heading(free, cell2) if cell2 else None
+            if h is None:
+                raise SystemExit(f"충전존 {i}: valid 한 헤딩이 없습니다.")
+            cell = cell2
+        used.add(cell)
+        starts[i] = (cell[0], cell[1], h)
+        if verbose:
+            print(f"[scene]   robot {i}: cell {cell} h={h}")
+    return starts
+
+
+def setup_lifelong(map_dir, n, pitch, seed, mode="cross", verbose=True):
+    """lifelong 용 진입점. 목표 대신 **스테이션 후보 집합**을 돌려준다.
+
+    one-shot 은 로봇마다 목표를 하나 뽑아 동시에 출발시키는데, 통로차단 이후
+    도달 가능한 목표가 한 줄로 쏠려 12대가 몰리고 어느 시드도 완주하지 못했다
+    (2026-09-07). lifelong 은 일을 시간에 걸쳐 흘려보내므로 그 쏠림이 없다.
+    """
+    geom = make_geom(pitch)
+    free, k = build_free(map_dir, pitch, mode)
+    raw = int(free.sum())
+    free, n_comp, n_hit = keep_station_component(free, geom, map_dir)
+    if verbose:
+        print(f"[scene] {geom.describe()}")
+        print(f"[scene] 격자 {free.shape} ({pitch} m, {k}x {mode} 풀링)")
+        print(f"[scene] 성분 {n_comp}개 중 스테이션 {n_hit}곳이 붙은 것만 사용 "
+              f"({raw} -> {int(free.sum())}칸)")
+    starts = pick_starts(free, geom, n, verbose)
+    cells = station_cells(free, geom, map_dir)
+    if verbose:
+        print("[scene] 스테이션 후보: "
+              + ", ".join(f"{c} {len(v)}" for c, v in sorted(cells.items())))
+    return geom, free, starts, cells
+
+
 def setup(map_dir, n, pitch, seed, mode="cross", verbose=True):
     """로컬·서버가 공통으로 부르는 진입점. 같은 인자면 같은 결과."""
     geom = make_geom(pitch)
     free, k = build_free(map_dir, pitch, mode)
+    raw = int(free.sum())
+    free, n_comp, n_hit = keep_station_component(free, geom, map_dir)
+    if verbose:
+        print(f"[scene] 성분 {n_comp}개 중 스테이션 {n_hit}곳이 붙은 것만 사용 "
+              f"({raw} -> {int(free.sum())}칸)")
     if verbose:
         print(f"[scene] {geom.describe()}")
         lo, hi = geom.pitch_window
