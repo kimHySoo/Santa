@@ -44,20 +44,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pibt_core_v2 as _pc                             # noqa: E402
 sys.modules.setdefault("pibt_core", _pc)
 
-# ★ heading_offset=0 이면 REVERSE_FACTOR 를 뒤집어야 한다.
+# REVERSE_FACTOR 는 **덮어쓰지 않는다** (2026-09-07, FMS develop 정렬).
 #
-#   pibt_core_v2 의 2026-09-06 수정은 heading_offset=2(구동축이 뒤)를 전제로
-#   REVERSE_FACTOR 를 `pos + DIRS[h]` 이동에 붙였다. 우리 에셋은 offset=0 이라
-#   그 자리가 **물리적 전진**이고, 그대로 두면 전진에 3배 벌점이 붙는다.
+#   develop 판 pibt_core.py 는 `pos - DIRS[h]`(물리 후진)에 3.0 을 붙인다.
+#   우리 에셋은 heading_offset=0 이고 그것이 이 규칙과 짝이므로 기본값이 맞다.
 #
-#   실측 (12대, pitch 1.2, seed 5, 프로세스 분리):
-#       REVERSE_FACTOR 3.0   전진  70 / 후진 932   (93% 후진)
-#       REVERSE_FACTOR 1/3   전진 951 / 후진  81   (92% 전진)
+#   [경위] 한때 REVERSE_FACTOR 를 1/3 로 뒤집어 두었다. 미머지 판(pos + DIRS[h]
+#   에 배율을 붙인 것)을 받아 쓰면서 전진에 3배 벌점이 붙었기 때문이다
+#   (전진 70 / 후진 932). FMS 본판으로 정렬하면서 그 우회를 걷어냈다.
 #
-#   정확히 거울상이다. 기하·안전은 어느 쪽이든 같고(칸 집합이 동일) 바뀌는 것은
-#   주행 방향뿐이다. 코드를 고치지 않고 배율만 역수로 둔다 — pibt_core_v2 를
-#   갱신해도 이 한 줄만 확인하면 된다.
-_pc.REVERSE_FACTOR = 1.0 / 3.0
+#   [두 판 실측 — 12대, pitch 1.2, max_steps 400]
+#       seed   미머지판 + 1/3            develop + 3.0
+#         4    OK  전진 90%  turn 108    STALL
+#         5    OK  전진 93%  turn 110    OK  전진 92%  turn 236
+#         9    OK  전진 93%  turn  90    STALL
+#        11    STALL                     OK  전진 91%  turn 214
+#        15    OK  전진 94%  turn  86    OK  전진 91%  turn 218
+#
+#   둘 다 전진 우세지만 동치가 아니다. develop 쪽은 회전이 2배 이상이다
+#   (배율이 이동에 붙느냐 후진에 붙느냐에 따라 turn_cost 와의 비율이 3배 달라진다).
+#   **회전이 많아지는 것은 9/4 선회 여유 결함과 겹치므로 주시해야 한다** —
+#   정점의 12.6%가 소인반경 기준 회전 불가다.
 
 from isaac_drive import RobotGeom                      # noqa: E402
 from pibt_core_v2 import valid_state, dist_map_h       # noqa: E402

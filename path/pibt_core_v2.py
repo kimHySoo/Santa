@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
 # ============================================================
+# 이 파일은 3_FMS/sim_engine/pibt_core.py 의 **사본**이다 (develop, 2026-09-07).
+# 직접 고치지 않는다 — FMS 쪽을 고치고 다시 복사한다.
+# 파일명이 _v2 인 것은 isaac_drive.py 가 `from pibt_core import ...` 로 부르기
+# 때문이고, pibt_scene.py 가 sys.modules 별칭으로 이어 준다.
+#
+# [REVERSE_FACTOR]  develop 은 `pos - DIRS[h]`(물리 후진)에 3.0 을 붙인다.
+# 우리 에셋의 heading_offset=0 이 이 규칙과 짝이므로 **덮어쓰지 않는다.**
+#
+# [완주 시드]  12대·pitch 1.2·max_steps 400 에서 5·10·11·15 (24시드 중 4).
+# ============================================================
+# -*- coding: utf-8 -*-
+# ============================================================
 # PIBT(Priority Inheritance with Backtracking) 코어 — MVP
 #
 # sim_v1_tasks.py의 이벤트 루프/도킹 대기슬롯 로직과 분리된 독립 모듈.
@@ -27,10 +39,6 @@
 #   정합해져 전진(= d)이 대기(= wait + d)를 항상 이김 → 비가중일 때의
 #   영구 정체(gain ≥ wait+1)가 사라지고, 비싼 통로는 dist 자체가 커져
 #   진입 시점부터 우회가 유도된다.
-#
-# 2026-09-06 수정 (isaac_drive.py 통합): REVERSE_FACTOR가 붙는 위치를 바로잡음.
-#   DIRS[h]는 로봇의 후방을 가리키므로 pos + DIRS[h] 이동이 물리적 후진이다.
-#   상세는 헤딩 모델 섹션의 ★ 블록과 REVERSE_FACTOR 주석 참조.
 # ============================================================
 from collections import deque
 from heapq import heappop, heappush
@@ -187,32 +195,15 @@ def run(free, starts, goals, edge_cost=None, wait_cost=None, max_steps=200):
 # 헤딩 모델 — 상태 (r, c, h), 2칸 점유, 제자리 회전 액션, 스윙 칸 예약
 # (설계: docs/2026-09-02_PIBT_헤딩_2칸점유_회전예약_설계.md)
 #
-#   pos(s)  = (r, c)              피벗(구동축)이 있는 칸 — 칸 중심에 정렬
-#   rear(s) = (r, c) - DIRS[h]    차체가 놓이는 두 번째 칸
+#   pos(s)  = (r, c)              앞축(구동축)이 있는 칸 — 칸 중심에 정렬
+#   rear(s) = (r, c) - DIRS[h]    뒤 차체(≈1.24m)가 있는 칸
 #   occupied(s) = {pos, rear}     로봇 1대 = 2칸
-#
-#   ★ DIRS[h]는 로봇의 후방을 가리킨다 (2026-09-06 확정)
-#
-#     피벗은 뒷바퀴이므로 차체는 피벗에서 '앞으로' 뻗는다. 그런데 이 모듈은
-#     차체를 pos - DIRS[h] 칸에 놓는다. 따라서
-#
-#         물리 헤딩 = DIRS[(h + 2) % 4]   (= -DIRS[h])
-#
-#     이고, pos → pos + DIRS[h] 이동은 물리적으로 **후진**이다.
-#     기하(occupied / swing_cells / turn_ok)는 전부 옳다 — 부호가 일관되게
-#     뒤집혀 있어 그대로 맞는다. 틀렸던 것은 비용 라벨뿐이었다(아래).
-#
-#     혼동을 막기 위해 이 파일의 주석은 격자 방향과 물리 방향을 구분해 쓴다:
-#         h-방향    = pos + DIRS[h]  = 물리 후진
-#         h-역방향  = pos - DIRS[h]  = 물리 전진
-#     isaac_drive.py 의 heading_offset = 2 가 이 규칙과 짝이다.
 #   valid(s)  ⇔ pos, rear 모두 free (벽에 등을 대고 설 수 없다)
-#   액션: h-방향 1칸   (물리 후진, edge_cost × REVERSE_FACTOR)
-#         / 좌·우 90° 회전 (turn_cost, 스윙 3칸 필요) / 대기
-#         / h-역방향 1칸 (물리 전진, edge_cost[pos, 반대방향])
+#   액션: 전진(edge_cost) / 좌·우 90° 회전(turn_cost, 스윙 3칸 필요) / 대기
+#         / 후진 1칸 (edge_cost[pos, 반대방향] × REVERSE_FACTOR)
 #   swing(h→h') = {rear(h), rear(h'), 그 사이 대각 칸}
 #
-#   물리 후진이 필요한 이유 (2026-09-02 실측): 벽에 붙은 레인(예: 충전기 열 c=108,
+#   후진이 필요한 이유 (2026-09-02 실측): 벽에 붙은 레인(예: 충전기 열 c=108,
 #   동쪽 c=109 벽)에서는 벽 쪽으로 뒤 칸이 필요한 방향으로 회전할 수 없어
 #   로봇이 레인에 갇힌다. 실제 로봇은 후진 후 회전(3점 회전)으로 빠져나온다.
 #
@@ -221,15 +212,7 @@ def run(free, starts, goals, edge_cost=None, wait_cost=None, max_steps=200):
 # ============================================================
 REAR_CELLS = 1      # 설계 §1: Isaac 실측 구동축 뒤 차체 1.03 m → 뒤 칸 1개 (2026-09-03 확정)
 TURN_TICKS = 1      # 설계 §1: Isaac 실측 90° 회전 0.76 s → 1틱 (2026-09-03 확정, 이전 가정 2틱)
-# 물리적 후진 1칸 비용 배율 — 느리고 시야 없는 동작이라 마지막 수단 (3점 회전용).
-# DIRS[h]가 후방을 가리키므로(위 ★) 이 배율은 **pos + DIRS[h] 이동**에 붙는다.
-#
-# 2026-09-06 수정: 이전에는 pos - DIRS[h](물리 전진)에 붙어 있었다. 기하는
-# 옳았으므로 충돌하지는 않았지만(무충돌 완주 10/10) 플래너가 물리적 후진을
-# 선호해 **주행 거리의 94.7%가 뒤로 가는 주행**이었다. 배율 위치를 바꾼 뒤
-# 10.6%로 내려갔고(남는 것은 3점 회전 — 원래 후진이 필요한 경우) 안전 지표는
-# 그대로다. 바뀐 곳은 candidates_h 2, HGraph.__init__ 4, _dist_map_h_ref 2.
-REVERSE_FACTOR = 3.0
+REVERSE_FACTOR = 3.0  # 후진 1칸 비용 배율 — 느리고 시야 없는 동작이라 마지막 수단 (3점 회전용)
 
 # 대기 상승(escalation) — 라이브니스 장치 (설계 §6, 2026-09-02 실측 근거):
 #   2칸 차체에서는 뒤차가 앞차의 뒤 칸을 원하면 앞차는 회전도 못 한다(스윙에 그 칸이
@@ -401,7 +384,7 @@ def stay_map_h(free, s):
 def _dist_map_h_ref(free, goal, edge_cost=None, turn_cost=None):
     """[참조 구현 — 동일성 테스트용, 실행 경로는 HGraph.dist] (칸, 방향) 그래프 위 goal까지의 최소 비용 (H, W, 4). 도달 불가/invalid 상태는 -1.
     goal 칸의 valid한 모든 방향이 0 (도착 방향 무관). 역방향 다익스트라:
-      h-방향 선행 u=(r-dr, c-dc, h): edge_cost[u, h] × REVERSE_FACTOR  (u가 valid)
+      전진 선행 u=(r-dr, c-dc, h): edge_cost[u, h]     (u가 valid)
       회전 선행 u=(r, c, h±1):    turn_cost           (turn_ok(u→(r,c,h)))"""
     H, W = free.shape
     if edge_cost is None:
@@ -423,13 +406,13 @@ def _dist_map_h_ref(free, goal, edge_cost=None, turn_cost=None):
         dr, dc = DIRS[h]
         ur, uc = r - dr, c - dc
         if valid_state(free, (ur, uc, h)) and not done[ur, uc, h]:
-            nd = dv + float(edge_cost[ur, uc, h]) * REVERSE_FACTOR
+            nd = dv + float(edge_cost[ur, uc, h])
             if dm[ur, uc, h] < 0 or nd < dm[ur, uc, h]:
                 dm[ur, uc, h] = nd
                 heappush(pq, (nd, (ur, uc, h)))
-        br, bc = r + dr, c + dc                       # h-역방향(물리 전진) 선행
+        br, bc = r + dr, c + dc                       # 후진 선행: 한 칸 앞에서 뒤로
         if valid_state(free, (br, bc, h)) and not done[br, bc, h]:
-            nd = dv + float(edge_cost[br, bc, (h + 2) % 4])
+            nd = dv + float(edge_cost[br, bc, (h + 2) % 4]) * REVERSE_FACTOR
             if dm[br, bc, h] < 0 or nd < dm[br, bc, h]:
                 dm[br, bc, h] = nd
                 heappush(pq, (nd, (br, bc, h)))
@@ -489,16 +472,16 @@ class HGraph:
                     i = base + h
                     pl, sl = [], []
                     dr, dc = DIRS[h]
-                    ur, uc = r - dr, c - dc                       # h-방향 선행 u→i: edge_cost[u, h] × REVERSE_FACTOR
+                    ur, uc = r - dr, c - dc                       # 전진 선행 u→i: 비용 edge_cost[u, h]
                     if 0 <= ur < H and 0 <= uc < W:
                         j = (ur * W + uc) * 4 + h
-                        pl.append((j, ec[j] * REVERSE_FACTOR, -1))
-                        sl.append((j, ec[(ur * W + uc) * 4 + (h + 2) % 4], -1))   # i→u 는 h-역방향(물리 전진)
-                    br, bc = r + dr, c + dc                       # h-역방향 선행 b→i: edge_cost[b, 반대]
+                        pl.append((j, ec[j], -1))
+                        sl.append((j, ec[(ur * W + uc) * 4 + (h + 2) % 4] * REVERSE_FACTOR, -1))   # i→u 는 후진
+                    br, bc = r + dr, c + dc                       # 후진 선행 b→i: edge_cost[b, 반대] × REVERSE_FACTOR
                     if 0 <= br < H and 0 <= bc < W:
                         j = (br * W + bc) * 4 + h
-                        pl.append((j, ec[(br * W + bc) * 4 + (h + 2) % 4], -1))
-                        sl.append((j, ec[i] * REVERSE_FACTOR, -1))                                  # i→b 는 h-방향(물리 후진)
+                        pl.append((j, ec[(br * W + bc) * 4 + (h + 2) % 4] * REVERSE_FACTOR, -1))
+                        sl.append((j, ec[i], -1))                                                   # i→b 는 전진
                     for h1 in ((h + 1) % 4, (h - 1) % 4):         # 회전 (r,c,h1)↔(r,c,h): 스윙 대각 칸 free 필요
                         d1, d2 = DIRS[h1], DIRS[h]
                         gr, gc = r - d1[0] - d2[0], c - d1[1] - d2[1]
@@ -669,15 +652,15 @@ def candidates_h(s, dist, edge_cost, wait_cost, free, turn_cost, bias=0.0):
     dr, dc = DIRS[h]
     rr, cc = r + dr, c + dc
     if _inb(free, (rr, cc)) and dist[rr, cc, h] >= 0:
-        scored.append((edge_cost[r, c, h] * REVERSE_FACTOR + dist[rr, cc, h], 1, (rr, cc, h),
+        scored.append((edge_cost[r, c, h] + dist[rr, cc, h], 1, (rr, cc, h),
                        frozenset(((rr, cc), (r, c)))))
     for i, h2 in enumerate(((h + 1) % 4, (h - 1) % 4)):
         if dist[r, c, h2] >= 0 and turn_ok(free, r, c, h, h2):
             scored.append((turn_cost + dist[r, c, h2], 2 + i, (r, c, h2),
                            frozenset({(r, c)} | swing_cells(r, c, h, h2))))
-    br, bc = r - dr, c - dc                            # h-역방향(물리 전진): pos→rear, rear→rear의 뒤
+    br, bc = r - dr, c - dc                            # 후진: pos→rear, rear→rear의 뒤
     if valid_state(free, (br, bc, h)) and dist[br, bc, h] >= 0:
-        scored.append((edge_cost[r, c, (h + 2) % 4] + dist[br, bc, h],
+        scored.append((edge_cost[r, c, (h + 2) % 4] * REVERSE_FACTOR + dist[br, bc, h],
                        4, (br, bc, h), frozenset(occupied((br, bc, h)))))
     scored.sort(key=lambda x: (x[0], x[1]))
     return [(st, cells) for _, _, st, cells in scored]

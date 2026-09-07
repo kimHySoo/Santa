@@ -12,8 +12,11 @@ OUT = "v2/traj_pibt_h"
 SUB = "traj_pibt_h"   # 서버 $PLAN 아래 폴더명
 USD = "pibt%d.usd"
 PITCH = 1.2
-SEED = 9
-GOOD_SEEDS = (4, 9, 11, 15, 17, 19, 22)      # 12대에서 완주 확인 (24시드 중 7)
+SEED = 5      # develop 판에서 완주. 이전 기본값 9 는 정체한다
+# 12대·pitch 1.2·max_steps 400 에서 계획이 완주하는 시드 (2026-09-07, 24시드 전수).
+# FMS develop 판 pibt_core 기준. 판이 바뀌면 이 목록도 바뀐다 —
+# 미머지판+1/3 에서는 4·5·9·10·15·22 였다.
+GOOD_SEEDS = (5, 10, 11, 15)
 
 
 def plan(n=12, seed=9, seconds=None, map_dir=None, extra=None):

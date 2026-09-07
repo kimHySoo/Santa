@@ -28,3 +28,9 @@ venv/
 
 # --- 압축 업로드 파일 ---
 *.tar.gz
+
+# --- NVIDIA 스트리머 추적 로그 (실행할 때마다 수십 MB 씩 쌓인다) ---
+*.etli
+
+# --- Jupyter ---
+.ipynb_checkpoints/
