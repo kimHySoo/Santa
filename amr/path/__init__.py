@@ -54,19 +54,20 @@ def get(name):
 
 
 def default_map():
-    """기본 맵 = **FMS 공식 맵**. (2026-09-07, fms 중심 전환)
+    """기본 맵 = **Isaac 씬과 같은 창고**의 맵.
 
-    이전 기본값은 팀 v5.9(`v2/upstream/.../t3_warehouse_map/map`)였다. FMS 는
-    2026-09-04 부터 `3_FMS/map` 을 공식 맵으로 쓰고 그쪽 기준값이 전부 그 맵에서
-    나온다. 기본값이 갈려 있으면 같은 명령이 조용히 다른 맵으로 계획된다.
+    ★ `map_fms` 를 기본으로 두면 안 된다 (2026-09-07).
+      `warehouse/map`(팀 v5.9)과 `warehouse/map_fms`(FMS 공식)는 **서로 다른
+      창고**다. 마스크가 다르고 packing 좌표가 y=33.8 vs 40.4 로 다르다.
+      Isaac 씬(`$SCENE` = warehouse_scene.usd)의 기하는 앞의 것이므로,
+      map_fms 로 계획해서 그 씬에서 주행하면 **로봇이 보이는 랙을 통과한다.**
 
-    두 맵의 차이 (2026-09-06 실측): 격자 정점 617 → 411. 남측 블록(y ≤ 38.7)이
-    통째로 없다 — 9/3 교착과 9/4 선회 결함이 나던 그 통로다.
+    map_fms 는 FMS 궤적을 받아 재생하는 `fms` 계획기에서만 쓴다 — 그때는
+    씬도 그쪽 기하로 지어야 한다.
     """
-    for d in (os.path.join(ROOT, "warehouse", "map_fms"),      # 서버 재구성 후
-              os.path.join(ROOT, "v2", "map_fms"),             # 로컬
-              os.path.join(ROOT, "fms", "map")):               # FMS 원본 사본
+    for d in (os.path.join(ROOT, "warehouse", "map"),        # 서버 재구성 후
+              os.path.join(ROOT, "v2", "upstream", "2_Simulation",
+                           "t3_warehouse_map", "map")):      # 로컬 원본
         if os.path.isfile(os.path.join(d, "obstacle_mask.npy")):
             return d
-    return os.path.join(ROOT, "v2", "upstream", "2_Simulation",
-                        "t3_warehouse_map", "map")
+    raise SystemExit("★ 맵을 찾을 수 없습니다 (warehouse/map 또는 v2/upstream/...)")
