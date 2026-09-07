@@ -142,6 +142,7 @@ MAX_STEPS = int(os.environ.get("PIBT_MAX_STEPS", "400"))
 MODE = os.environ.get("PIBT_MODE", "oneshot")          # oneshot | lifelong
 HORIZON = int(os.environ.get("PIBT_HORIZON", "315"))   # 315틱 = 계획 420 s
 BATTERY = os.environ.get("PIBT_BATTERY", "0") not in ("0", "", "false")
+DISPATCH = os.environ.get("PIBT_DISPATCH", "fms")      # fms | robot_first
 CAMERA = os.environ.get("PIBT_CAMERA", "/World/Cameras/Cam_Top")
 SPAWN_Z = float(os.environ.get("PIBT_SPAWN_Z", "0.081"))   # build_amr_scene 의 WHEEL_R
 LEFT_IDX, RIGHT_IDX = 0, 1
@@ -457,9 +458,10 @@ async def _run():
         if MODE == "lifelong":
             adg, order, history, info = plan_and_build_lifelong(
                 free, starts, goals, geom, horizon=HORIZON, seed=SEED,
-                battery=BATTERY,
+                battery=BATTERY, dispatch=DISPATCH,
                 docks=PS.charge_docks(free, geom) if BATTERY else ())
-            carb.log_warn(f"[pibt] lifelong {HORIZON}틱 · 배터리 {BATTERY}")
+            carb.log_warn(f"[pibt] lifelong {HORIZON}틱 · 배터리 {BATTERY} "
+                          f"· 배차 {DISPATCH}")
             import metrics
             for ln in metrics.fmt(info["throughput"]).splitlines():
                 carb.log_warn(ln)

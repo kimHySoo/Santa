@@ -7,5 +7,6 @@
  "heading_offset": 0,
  "mode": "lifelong",
  "horizon": 315,
- "battery": true
+ "battery": true,
+ "dispatch": "robot_first"
 }

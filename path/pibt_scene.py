@@ -514,6 +514,8 @@ def main():
     ap.add_argument("--order-gap", type=int, default=15)
     ap.add_argument("--battery", action="store_true",
                     help="배터리·충전 도크")
+    ap.add_argument("--dispatch", choices=("fms", "robot_first"), default="fms",
+                    help="배차 정책. fms=태스크 순회(기본) / robot_first=로봇 순회")
     args = ap.parse_args()
 
     map_dir = os.path.abspath(args.map)
@@ -532,7 +534,8 @@ def main():
         json.dump(dict(n=args.n, pitch=args.pitch, seed=args.seed, pool=args.pool,
                        map=map_dir, heading_offset=GEOM_KW["heading_offset"],
                        mode="lifelong" if args.lifelong else "oneshot",
-                       horizon=args.horizon, battery=bool(args.battery)),
+                       horizon=args.horizon, battery=bool(args.battery),
+                       dispatch=args.dispatch),
                   f, ensure_ascii=False, indent=1)
     print(f"[scene] 저장: {d}")
 
@@ -544,6 +547,7 @@ def main():
             adg, order, history, info = plan_and_build_lifelong(
                 free, starts, goals, geom, horizon=horizon, seed=args.seed,
                 order_gap=args.order_gap, battery=args.battery,
+                dispatch=args.dispatch,
                 docks=charge_docks(free, geom) if args.battery else ())
         else:
             from isaac_drive import plan_and_build

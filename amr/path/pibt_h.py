@@ -15,6 +15,13 @@ USD = "pibt%d.usd"
 PITCH = 1.2
 SEED = 1
 MODE = "lifelong"          # oneshot | lifelong
+# 배차 정책. fms=태스크 순회(FMS 이식본) / robot_first=로봇 순회
+#   큐는 비지 않고(평균 7.2개) 빈 로봇은 한두 대다 — 태스크가 흔하고 로봇이
+#   귀하므로 **귀한 쪽을 기준으로** 돈다. 실측 12시드: 완료 +12.8%,
+#   최대지연 -6.0%, 6승 1패 5무 (부호검정 p ~ 0.06).
+#   방향은 분명하지만 표본이 작다. `--dispatch fms` 로 언제든 되돌릴 수 있게
+#   두 정책을 모두 살려 뒀다 (dispatch.py).
+DISPATCH = "robot_first"
 HORIZON = 315              # 틱. 315 x (1.2/0.9) = 계획 420 s
 BATTERY = True
 
@@ -44,6 +51,7 @@ def plan(n=12, seed=None, seconds=None, map_dir=None, extra=None):
             argv += ["--seconds", str(seconds), "--clock", "plan"]
         if BATTERY:
             argv += ["--battery"]
+        argv += ["--dispatch", DISPATCH]
     out = run(argv + (extra or []))
     return {"out": os.path.join(rel(OUT), f"fleet_{n:02d}"), "log": out,
             "note": f"{MODE} · {HORIZON}틱 = 계획 420 s "
@@ -68,7 +76,8 @@ def launch(n=12):
         env=[("PIBT_SEED", str(SEED)), ("PIBT_PITCH", str(PITCH)),
              ("PIBT_STAGE", "$STAGE/" + USD % n), ("PIBT_MAP", "$MAP"),
              ("PIBT_MODE", MODE), ("PIBT_HORIZON", str(HORIZON)),
-             ("PIBT_BATTERY", "1" if BATTERY else "0")],
+             ("PIBT_BATTERY", "1" if BATTERY else "0"),
+             ("PIBT_DISPATCH", DISPATCH)],
         flags=["--/rtx/post/motionblur/enabled=false"])
 
 

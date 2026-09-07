@@ -1530,7 +1530,8 @@ def plan_and_build_lifelong(free: np.ndarray, starts: dict[int, State],
                             order_gap: int = 15,
                             shifts=("in", "out", "out"),
                             battery: bool = False, docks=(),
-                            battery_kw: dict | None = None, **run_kw):
+                            battery_kw: dict | None = None,
+                            dispatch: str = "fms", **run_kw):
     """`lifelong.run_lifelong` 으로 계획하고 ADG 까지 만든다.
 
     `plan_and_build` 과 **같은 것**을 돌려준다. one-shot 과 달리 "전원이
@@ -1541,11 +1542,19 @@ def plan_and_build_lifelong(free: np.ndarray, starts: dict[int, State],
     from lifelong import run_lifelong
 
     kw = dict(run_kw)
+    base, bkw = None, {}
     if battery:
         from battery import BatteryKernel
+        base = BatteryKernel
         bkw = dict(docks=list(docks), pitch=geom.pitch, seed=seed)
         bkw.update(battery_kw or {})
-        kw.update(kernel_cls=BatteryKernel, kernel_kw=bkw)
+    if dispatch != "fms":
+        # 정책 교체는 서브클래스로만 한다 — lifelong.py 는 안 건드린다.
+        from dispatch import with_policy
+        from lifelong import Kernel
+        base = with_policy(base or Kernel, dispatch)
+    if base is not None:
+        kw.update(kernel_cls=base, kernel_kw=bkw)
 
     history, cells_hist, li = run_lifelong(
         free, starts, cells_by_cat, horizon=horizon, seed=seed,
@@ -1562,7 +1571,8 @@ def plan_and_build_lifelong(free: np.ndarray, starts: dict[int, State],
             "sweep": sweep_audit(geom, history, cells_hist),
             "lifelong": li,
             "throughput": metrics.throughput(li["tasks_done"], horizon, geom,
-                                             makespan=cp)}
+                                             makespan=cp),
+            "dispatch": dispatch}
     if battery:
         from battery import watchdog
         info["battery_warn"] = watchdog(li, strict=False)

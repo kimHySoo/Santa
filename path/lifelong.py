@@ -158,6 +158,21 @@ class Kernel(object):
 
     # --- 배차: waiting FIFO × 맨해튼 최근접 (FMS _try_assign_all) ---
     def assign(self, t):
+        """정책 훅. 본문은 `dispatch` 에 있고, 교체는 dispatch.py 가 한다.
+
+        ★ 이 한 줄이 이음새다. FMS 정책(`dispatch`)은 그대로 두고 우리
+          정책을 별도 파일에서 끼운다 — `lifelong.py` 는 FMS 이식본이라
+          여기를 직접 고치면 패리티가 조용히 깨진다.
+        """
+        return self.dispatch(t)
+
+    def dispatch(self, t):
+        """FMS 정책 — waiting FIFO x 맨해튼 최근접.
+
+        [FMS 원본과의 유일한 차이] 드롭 칸 도달성 검사를 더했다. 이건
+        처리량이 아니라 **틀린 것을 안 하게 하는** 변경이라 정책과 무관하게
+        필요하다 (아래 주석 참조). 그 외에는 한 글자도 안 바꾼다.
+        """
         elig = [a for a, r in self.rb.items() if r["state"] in (IDLE, FREED)]
         for task in list(self.waiting):
             if not elig:
