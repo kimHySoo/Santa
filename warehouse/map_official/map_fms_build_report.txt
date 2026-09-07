@@ -1,0 +1,7 @@
+FMS 공식 맵 (벽있음 ∪ v5.8 장애물) 생성 보고 — build_fms_map.py
+shape (1061, 1151), 0.1 m
+wall_ref 대비 추가 장애물 칸(0.1 m): 49715 = 값6:34932, 값5:5761, 값2:5380, 값1:3642
+  값1 추가분 = 기둥(columns.npy 12개 등)·남쪽 폐쇄 구역 내부 구조물
+v5.8 대비 유지된 벽(v5.8은 통행): 19909 칸
+값 분포: 0:1081451, 1:29052, 2:48420, 3:8172, 4:2749, 5:16435, 6:34932
+stations 키: ['input', 'output', 'charger', 'charge_q', 'aisle_buf', 'inbound_buf', 'qc', 'induction', 'consol', 'packing', 'vas', 'returns', 'charge_zone']
