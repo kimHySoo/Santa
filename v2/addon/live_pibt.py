@@ -21,6 +21,30 @@ live_wppl12.py 와 무엇이 다른가
 omni 가 지역변수로 잡혀 UnboundLocalError 가 난다 (2026-08-30 실측).
 
 ===========================================================================
+2026-09-07 (3) — 스크린샷 캡처 (영상용)
+===========================================================================
+`PIBT_SHOTS` 에 폴더를 주면 **물리 스텝 `PIBT_SHOT_STRIDE` 개마다 한 장**
+뷰포트를 저장한다. 물리 dt(60 Hz)는 건드리지 않으므로 **정확도는 그대로**다.
+
+배속이 후처리 추정이 아니라 설계값이 된다 — 30 fps 로 조립하면
+
+    배속 = STRIDE / 2        (물리 60 Hz, 출력 30 fps)
+    STRIDE 20 -> 10배속 · sim 0.333s/프레임
+
+파일명에 sim 시각(0.01 s 단위, 9자리)을 박으므로 **프레임 간격을 파일명으로
+검산**할 수 있다. 캡처가 밀리면 간격이 튀고, 그 구간만 영상이 빨라 보인다.
+0.01 s 해상도라 STRIDE 1 까지 이름이 충돌하지 않는다.
+
+★ 화면녹화와 달리 프레임 수가 1/STRIDE 로 줄므로 렌더 부하도 줄어든다.
+  다만 그 단축폭은 렌더가 스텝비용의 몇 %인지에 달렸고 **아직 안 쟀다**
+  (유휴 0.346x vs 주행 0.330x 는 "로봇을 굴리는 변동비 4.6%"만 말해준다).
+  --lite 와 함께 한 번 재서 기록할 것.
+
+★ 띄엄띄엄 렌더하면 프레임 사이(0.333 s)에 스친 것은 눈으로 놓친다.
+  그래서 무충돌 보장은 영상이 아니라 **매 스텝 도는 숫자**(overlap_events)가
+  해야 한다. 캡처를 켜도 그 검사는 그대로 돈다.
+
+===========================================================================
 2026-09-07 수정 — 로봇이 멈추지 않고 회전하던 원인
 ===========================================================================
 증상: 여러 대가 **부호만 다른 똑같은 각속도(±0.60 rad/s)로 3초 넘게 계속**
@@ -147,7 +171,15 @@ CAMERA = os.environ.get("PIBT_CAMERA", "/World/Cameras/Cam_Top")
 SPAWN_Z = float(os.environ.get("PIBT_SPAWN_Z", "0.081"))   # build_amr_scene 의 WHEEL_R
 LEFT_IDX, RIGHT_IDX = 0, 1
 
-state = {"sub": None, "fleet": None, "n": 0, "t": 0.0, "done": False}
+# --- 스크린샷 캡처 (영상용) ---
+#   빈 문자열이면 아무 것도 하지 않는다 — 기존 동작과 완전히 같다.
+SHOTS = os.environ.get("PIBT_SHOTS", "")
+SHOT_STRIDE = max(1, int(os.environ.get("PIBT_SHOT_STRIDE", "20")))
+SHOT_EXT = os.environ.get("PIBT_SHOT_EXT", "png")      # png | jpg
+SHOT_FPS = int(os.environ.get("PIBT_SHOT_FPS", "30"))  # 조립 fps (배속 계산용)
+
+state = {"sub": None, "fleet": None, "n": 0, "t": 0.0, "done": False,
+         "vp": None, "shots": 0, "shot_fail": 0}
 
 
 def wrap_pi(a):
@@ -323,8 +355,66 @@ def _snap_back(arts, geom, starts):
 
 
 # ===========================================================================
-# 물리 콜백
+# 스크린샷 — 물리는 건드리지 않는다
 # ===========================================================================
+
+
+def _shot_speed():
+    """물리 60 Hz 에서 STRIDE 스텝마다 1장을 SHOT_FPS 로 조립했을 때의 배속."""
+    return SHOT_STRIDE * SHOT_FPS / 60.0
+
+
+def _shot_setup():
+    """캡처를 켤 준비. 실패하면 조용히 끈다 (주행이 우선이다)."""
+    if not SHOTS:
+        return None
+    try:
+        os.makedirs(SHOTS, exist_ok=True)
+        from omni.kit.viewport.utility import get_active_viewport
+        vp = get_active_viewport()
+        if vp is None:
+            carb.log_warn("[pibt] 캡처: 활성 뷰포트가 없습니다 — 캡처 끔")
+            return None
+        carb.log_warn(
+            f"[pibt] 캡처 ON  {SHOTS}  {SHOT_STRIDE}스텝마다 .{SHOT_EXT}  "
+            f"-> {SHOT_FPS}fps 조립 시 {_shot_speed():.1f}배속")
+        return vp
+    except Exception as e:
+        carb.log_warn(f"[pibt] 캡처 준비 실패 — 캡처 끔: {e}")
+        return None
+
+
+def _shot(vp, sim_t):
+    """한 장 저장. **파일명에 sim 시각(0.01s·9자리)** 을 박아 간격을 검산 가능하게.
+
+    캡처는 비동기다 (다음 렌더 프레임에 기록된다). 실패가 반복되면 끈다 —
+    캡처 때문에 주행이 죽는 것이 가장 나쁘다.
+    """
+    try:
+        from omni.kit.viewport.utility import capture_viewport_to_file
+        capture_viewport_to_file(
+            vp, os.path.join(SHOTS, f"f_{int(round(sim_t * 100)):09d}.{SHOT_EXT}"))
+        state["shots"] += 1
+    except Exception as e:
+        state["shot_fail"] += 1
+        if state["shot_fail"] <= 3:
+            carb.log_warn(f"[pibt] 캡처 실패 {state['shot_fail']}회: {e}")
+        if state["shot_fail"] >= 20:
+            carb.log_warn("[pibt] 캡처 실패가 20회 — 캡처를 끕니다 (주행은 계속)")
+            state["vp"] = None
+
+
+def _shot_report():
+    """완주·중단 시 프레임 수와 조립 명령을 로그에 남긴다."""
+    if not SHOTS or not state["shots"]:
+        return
+    n = state["shots"]
+    sp = _shot_speed()
+    carb.log_warn(f"[pibt] 캡처 {n}장 · 실패 {state['shot_fail']}회 -> {SHOTS}")
+    carb.log_warn(f"[pibt] 영상 {n / SHOT_FPS:.0f}초 @{SHOT_FPS}fps = {sp:.1f}배속")
+    carb.log_warn(f"[pibt] 조립: cd {SHOTS} && ffmpeg -framerate {SHOT_FPS} "
+                  f"-pattern_type glob -i 'f_*.{SHOT_EXT}' "
+                  f"-c:v libx264 -pix_fmt yuv420p -crf 20 ../demo.mp4")
 
 
 def _on_physics(dt):
@@ -357,12 +447,18 @@ def _tick(f, dt):
         state["done"] = True
         return
 
+    # --- 스크린샷: 물리와 무관하게, STRIDE 스텝마다 한 장 ---
+    #   f.step 뒤에 둔다 — 이 프레임의 결과를 담아야 한다.
+    if state["vp"] is not None and state["n"] % SHOT_STRIDE == 0:
+        _shot(state["vp"], state["t"])
+
     # 개루프 — 명령은 나가는데 pose 가 안 변한다. probe 를 통과했는데도 나오면
     # 주행 중에 pose 소스가 끊긴 것이다 (타임라인 정지, prim 재로드 등).
     if f.open_loop:
         carb.log_error("[pibt] ★ 제어 루프 끊김")
         for m in f.open_loop[:6]:
             carb.log_error("   " + m)
+        _shot_report()
         state["done"] = True
         return
 
@@ -378,18 +474,21 @@ def _tick(f, dt):
                 carb.log_error("   " + line)
         except Exception as e:
             carb.log_error(f"   diagnose 실패: {e}")
+        _shot_report()
         state["done"] = True
         return
 
     if f.finished:
         carb.log_warn(f"[pibt] 전원 완주 — 시뮬 {state['t']:.1f}s")
         carb.log_warn(f"[pibt] {f.stats}")
+        _shot_report()
         state["done"] = True
         return
 
     if state["n"] % 600 == 0:
         carb.log_warn(f"[pibt] t={state['t']:.0f}s  {f.stats}"
-                      + (f"  타임아웃 {len(f.timeouts)}" if f.timeouts else ""))
+                      + (f"  타임아웃 {len(f.timeouts)}" if f.timeouts else "")
+                      + (f"  캡처 {state['shots']}장" if SHOTS else ""))
         for m in f.timeouts[-2:]:
             carb.log_warn("   " + m)
 
@@ -643,6 +742,10 @@ async def _run():
             carb.log_error("   " + line)
         return
     state["fleet"] = fleet
+
+    # ★ 캡처는 **주행 시작 직전에** 켠다 — 씬 로드·probe·재정렬 구간이
+    #   영상에 들어가면 안 된다 (그 70초는 볼 것이 없다).
+    state["vp"] = _shot_setup()
 
     state["sub"] = omni.physx.get_physx_interface() \
         .subscribe_physics_step_events(_on_physics)
