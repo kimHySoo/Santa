@@ -3,7 +3,7 @@
  "pitch": 1.2,
  "seed": 1,
  "pool": "cross",
- "map": "C:\\Users\\SSAFY\\workspace\\santa\\Santa\\warehouse\\map_fms",
+ "map": "C:\\Users\\SSAFY\\workspace\\santa\\Santa\\warehouse\\map",
  "heading_offset": 0,
  "mode": "lifelong",
  "horizon": 315,

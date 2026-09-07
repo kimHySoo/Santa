@@ -153,8 +153,20 @@ def build_free(map_dir, pitch, mode="cross"):
     if os.path.basename(src) == "occupancy_grid.npy":
         vals = getattr(_CFG, "OBSTACLE_VALUES", (1, 2, 5, 6)) if _CFG else (1, 2, 5, 6)
         mask = np.isin(g, vals)
-    else:                                    # 원본이 없으면 팽창본으로라도 (경고)
+    else:
+        # ★ 후퇴 분기. 여기 오면 **이중 팽창**이라 통로가 막힌다.
+        #   주석만 "(경고)" 라고 써 두고 아무것도 안 찍었더니, 서버에서는
+        #   이중 팽창 수정이 처음부터 안 돌고 있었다 (2026-09-07, 하루 날림).
+        #   로컬 map_fms 에는 원본이 있어 검증은 전부 통과했다.
         mask = g.astype(bool)
+        sys.stderr.write(
+            "\n[pibt_scene] ★★ occupancy_grid.npy 가 없어 **팽창본**으로 후퇴합니다.\n"
+            f"   맵: {map_dir}\n"
+            "   헤딩 모델은 차체를 2칸+스윙으로 직접 표현하므로 팽창본을 쓰면\n"
+            "   차체를 두 번 셉니다 — 3 m 통로가 막히고 packing·consol 이\n"
+            "   도달 불가가 됩니다 (완료 0 · 대기만 쌓임).\n"
+            "   복원:  python deinflate_map.py <맵폴더> --write\n"
+            "   확인:  python diag_reach.py <맵폴더>\n\n")
     if _CFG is not None and getattr(_CFG, "AISLE_BLOCK", False):
         mask = _CFG.apply_aisle_block(mask.copy())
     R, C = mask.shape

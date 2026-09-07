@@ -151,6 +151,11 @@ class Kernel(object):
     def reachable(self, a, goal):
         return self.dm(goal)[self.states[a]] >= 0
 
+    def reachable_between(self, frm, to):
+        """픽 칸에서 드롭 칸으로 갈 수 있나 — 헤딩 하나라도 되면 참."""
+        dm = self.dm(to)
+        return bool((dm[frm[0], frm[1]] >= 0).any())
+
     # --- 배차: waiting FIFO × 맨해튼 최근접 (FMS _try_assign_all) ---
     def assign(self, t):
         elig = [a for a, r in self.rb.items() if r["state"] in (IDLE, FREED)]
@@ -158,7 +163,15 @@ class Kernel(object):
             if not elig:
                 break
             fr, fc = task["frm"]
-            cand = [a for a in elig if self.reachable(a, task["frm"])]
+            # ★ 픽 칸만 보면 안 된다. 드롭 칸이 도달 불가인 태스크를 받으면
+            #   그 로봇은 거리장이 전부 -1 이라 TO_DROP(RANK 1)으로 **영구 정지**
+            #   한다. 우선순위가 높아서 남까지 막는다. 실측 (팽창본 맵):
+            #       드롭 검사 없음  완료 6 · 대기 13   정지 발생
+            #       드롭 검사 있음  완료 7 · 대기  0   정지 없음
+            #   맵이 정상이어도 칸 하나만 끊기면 같은 일이 나므로 상시로 둔다.
+            cand = [a for a in elig
+                    if self.reachable(a, task["frm"])
+                    and self.reachable_between(task["frm"], task["to"])]
             if not cand:
                 continue
             a = min(cand, key=lambda i: abs(self.states[i][0] - fr)
