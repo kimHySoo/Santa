@@ -139,6 +139,9 @@ N = int(os.environ.get("PIBT_N", "12"))
 PITCH = float(os.environ.get("PIBT_PITCH", "1.2"))
 SEED = int(os.environ.get("PIBT_SEED", "9"))
 MAX_STEPS = int(os.environ.get("PIBT_MAX_STEPS", "400"))
+MODE = os.environ.get("PIBT_MODE", "oneshot")          # oneshot | lifelong
+HORIZON = int(os.environ.get("PIBT_HORIZON", "315"))   # 315틱 = 계획 420 s
+BATTERY = os.environ.get("PIBT_BATTERY", "0") not in ("0", "", "false")
 CAMERA = os.environ.get("PIBT_CAMERA", "/World/Cameras/Cam_Top")
 SPAWN_Z = float(os.environ.get("PIBT_SPAWN_Z", "0.081"))   # build_amr_scene 의 WHEEL_R
 LEFT_IDX, RIGHT_IDX = 0, 1
@@ -429,7 +432,8 @@ async def _run():
 
     # --- 계획 (Isaac 불필요, 순수 numpy — 로컬과 같은 시드면 같은 결과) ---
     import pibt_scene as PS
-    from isaac_drive import DifferentialDriver, FleetController, plan_and_build
+    from isaac_drive import (DifferentialDriver, FleetController, plan_and_build,
+                             plan_and_build_lifelong)
 
     # ★ 어느 파일이 실제로 로드됐는지 찍는다 — 서버에 사본이 둘 이상이면
     #   고친 파일이 아니라 옛 사본이 돌 수 있다 (2026-09-06 폴더 재구성).
@@ -441,16 +445,32 @@ async def _run():
                   f"verify_start={'O' if hasattr(_id.FleetController, 'verify_start') else 'X'} "
                   f"open_loop={'O' if hasattr(_id.FleetController, '_watch_open_loop') else 'X'}")
 
-    carb.log_warn(f"[pibt] 계획 시작  n={N} pitch={PITCH} seed={SEED}")
-    geom, free, starts, goals = PS.setup(MAP, N, PITCH, SEED, verbose=False)
+    carb.log_warn(f"[pibt] 계획 시작  n={N} pitch={PITCH} seed={SEED} mode={MODE}")
+    if MODE == "lifelong":
+        geom, free, starts, goals = PS.setup_lifelong(MAP, N, PITCH, SEED,
+                                                      verbose=False)
+    else:
+        geom, free, starts, goals = PS.setup(MAP, N, PITCH, SEED, verbose=False)
     carb.log_warn(f"[pibt] {geom.pivot_name}  격자 {free.shape} "
                   f"통행가능 {100*free.mean():.1f}%")
     try:
-        adg, order, history, info = plan_and_build(free, starts, goals, geom,
-                                                  max_steps=MAX_STEPS)
+        if MODE == "lifelong":
+            adg, order, history, info = plan_and_build_lifelong(
+                free, starts, goals, geom, horizon=HORIZON, seed=SEED,
+                battery=BATTERY,
+                docks=PS.charge_docks(free, geom) if BATTERY else ())
+            carb.log_warn(f"[pibt] lifelong {HORIZON}틱 · 배터리 {BATTERY}")
+            import metrics
+            for ln in metrics.fmt(info["throughput"]).splitlines():
+                carb.log_warn(ln)
+            for w in info.get("battery_warn") or []:
+                carb.log_warn("[pibt] ★ " + w)
+        else:
+            adg, order, history, info = plan_and_build(free, starts, goals, geom,
+                                                      max_steps=MAX_STEPS)
     except SystemExit as e:
         carb.log_error(f"[pibt] 계획 정체: {e}")
-        carb.log_error("[pibt] PIBT_SEED 를 바꿔보세요 (완주 확인 시드: 4·9·11·15·17·19·22)")
+        carb.log_error("[pibt] one-shot 은 시드를 타므로 PIBT_MODE=lifelong 을 쓰세요")
         return
     except RuntimeError as e:
         carb.log_error(f"[pibt] {e}")     # ADG 순환 = 주행 전에 잡힌 데드락

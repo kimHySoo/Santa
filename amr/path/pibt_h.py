@@ -6,17 +6,25 @@ from . import default_map
 from ._common import Launch, rel, run, scene_cmd as _scene
 
 NAME = "pibt_h"
-DESC = "PIBT 헤딩(2칸 점유·스윙 예약·후진) + ADG · 1.2 m 격자 · one-shot"
+DESC = ("PIBT 헤딩(2칸 점유·스윙 예약·후진) + ADG · 1.2 m 격자 · "
+        "lifelong 주문 스트림 · 배터리/충전 도크")
 DRIVE = "adg"
 OUT = "v2/traj_pibt_h"
 SUB = "traj_pibt_h"   # 서버 $PLAN 아래 폴더명
 USD = "pibt%d.usd"
 PITCH = 1.2
-SEED = 1      # FMS 공식 맵 + 통로차단에서 완주
-# 12대·pitch 1.2·max_steps 400 에서 계획이 완주하는 시드 (2026-09-07, 24시드 전수).
-# **맵이 바뀌면 이 목록도 바뀐다.** 기준: FMS 공식 맵 + 통로차단 ON, develop pibt_core.
-#   v5.9 맵·차단 없음이었을 때는 5·10·11·15 였다 — 그 값으로 돌리면 정체한다.
-GOOD_SEEDS = (1, 4, 16, 18, 21)
+SEED = 1
+MODE = "lifelong"          # oneshot | lifelong
+HORIZON = 315              # 틱. 315 x (1.2/0.9) = 계획 420 s
+BATTERY = True
+
+# ★ GOOD_SEEDS 를 지웠다.
+#
+#   one-shot 은 "전원이 동시에 목표에 있어야 성공" 이고 PIBT 는 그 조건에서
+#   완전하지 않다 — 그래서 완주하는 시드를 골라야 했다 (24시드 중 4~6개).
+#   lifelong 은 그 조건이 없다. 도착하면 새 태스크를 받고 떠나므로 목표에
+#   주차한 로봇이 남을 막는 상황 자체가 사라진다.
+SEEDS_CHECKED = (1, 2, 4, 5, 7, 9, 11, 16, 18, 21, 22, 25)
 
 
 def plan(n=12, seed=None, seconds=None, map_dir=None, extra=None):
@@ -25,9 +33,21 @@ def plan(n=12, seed=None, seconds=None, map_dir=None, extra=None):
     argv = ["pibt_scene.py", "--n", str(n), "--pitch", str(PITCH),
             "--seed", str(SEED if seed is None else seed),
             "--map", map_dir or default_map(), "--out", rel(OUT), "--plan"]
+    if MODE == "lifelong":
+        argv += ["--lifelong"]
+        # `seconds` 가 드디어 쓰인다. 다만 **어느 초인지**를 정해야 한다.
+        #   --clock plan : 계획 시간 (FMS 틱과 같은 단위). 420 s -> 315틱
+        #   --clock wall : Isaac 벽시계.  420 s -> 183틱 (stretch 1.72)
+        if seconds is None:
+            argv += ["--horizon", str(HORIZON)]
+        else:
+            argv += ["--seconds", str(seconds), "--clock", "plan"]
+        if BATTERY:
+            argv += ["--battery"]
     out = run(argv + (extra or []))
     return {"out": os.path.join(rel(OUT), f"fleet_{n:02d}"), "log": out,
-            "note": "one-shot (목표 1회). 420초 순환은 아직 안 됨"}
+            "note": f"{MODE} · {HORIZON}틱 = 계획 420 s "
+                    f"(Isaac 벽시계로는 x1.72 = 722 s)"}
 
 
 def verify(n=12, map_dir=None):
@@ -46,7 +66,9 @@ def launch(n=12):
     return Launch(
         "live_pibt.py",
         env=[("PIBT_SEED", str(SEED)), ("PIBT_PITCH", str(PITCH)),
-             ("PIBT_STAGE", "$STAGE/" + USD % n), ("PIBT_MAP", "$MAP")],
+             ("PIBT_STAGE", "$STAGE/" + USD % n), ("PIBT_MAP", "$MAP"),
+             ("PIBT_MODE", MODE), ("PIBT_HORIZON", str(HORIZON)),
+             ("PIBT_BATTERY", "1" if BATTERY else "0")],
         flags=["--/rtx/post/motionblur/enabled=false"])
 
 

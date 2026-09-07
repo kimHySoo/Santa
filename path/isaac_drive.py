@@ -1493,6 +1493,50 @@ while simulation_app.is_running():
     if fleet.finished:
         break
 '''
+def plan_and_build_lifelong(free: np.ndarray, starts: dict[int, State],
+                            cells_by_cat: dict, geom: RobotGeom,
+                            horizon: int = 315, seed: int = 0,
+                            order_gap: int = 15,
+                            shifts=("in", "out", "out"),
+                            battery: bool = False, docks=(),
+                            battery_kw: dict | None = None, **run_kw):
+    """`lifelong.run_lifelong` 으로 계획하고 ADG 까지 만든다.
+
+    `plan_and_build` 과 **같은 것**을 돌려준다. one-shot 과 달리 "전원이
+    동시에 목표에 있어야 성공" 조건이 없으므로 `GOOD_SEEDS` 가 필요 없다.
+    `extract_actions`·`build_adg`·`sweep_audit` 은 한 줄도 안 고친다 —
+    lifelong 의 `history` 형식이 `run_h` 와 같기 때문이다.
+    """
+    from lifelong import run_lifelong
+
+    kw = dict(run_kw)
+    if battery:
+        from battery import BatteryKernel
+        bkw = dict(docks=list(docks), pitch=geom.pitch, seed=seed)
+        bkw.update(battery_kw or {})
+        kw.update(kernel_cls=BatteryKernel, kernel_kw=bkw)
+
+    history, cells_hist, li = run_lifelong(
+        free, starts, cells_by_cat, horizon=horizon, seed=seed,
+        order_gap=order_gap, shifts=shifts, **kw)
+
+    chains, order, stats = extract_actions(history, geom)
+    adg = build_adg(chains)
+    if adg.topological_order() is None:
+        raise RuntimeError("ADG에 순환이 있다 — 실행하면 데드락이다")
+
+    import metrics
+    cp = metrics.critical_path(adg, geom)
+    info = {"actions": stats,
+            "sweep": sweep_audit(geom, history, cells_hist),
+            "lifelong": li,
+            "throughput": metrics.throughput(li["tasks_done"], horizon, geom,
+                                             makespan=cp)}
+    if battery:
+        from battery import watchdog
+        info["battery_warn"] = watchdog(li, strict=False)
+    return adg, order, history, info
+
 
 
 def main() -> int:

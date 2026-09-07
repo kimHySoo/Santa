@@ -415,6 +415,24 @@ def pick_starts(free, geom, n, verbose=True):
     return starts
 
 
+def charge_docks(free, geom, n=None):
+    """CHARGE_ZONE 의 world 좌표 -> 통행가능한 격자 칸. battery.py 가 쓴다.
+
+    `pick_starts` 와 같은 `_nearest_free` 후퇴를 쓴다 — 충전존에서 출발하므로
+    보통 시작 칸과 같은 칸들이 나온다.
+    """
+    H, W = free.shape
+    out, used = [], set()
+    for (x, y) in (CHARGE_ZONE if n is None else CHARGE_ZONE[:n]):
+        want = _cell_of(geom, x, y)
+        cell = want if (0 <= want[0] < H and 0 <= want[1] < W
+                        and free[want] and want not in used) else             _nearest_free(free, want, used)
+        if cell is not None:
+            used.add(cell)
+            out.append(cell)
+    return out
+
+
 def setup_lifelong(map_dir, n, pitch, seed, mode="cross", verbose=True):
     """lifelong 용 진입점. 목표 대신 **스테이션 후보 집합**을 돌려준다.
 
@@ -472,10 +490,27 @@ def main():
     ap.add_argument("--plan", action="store_true",
                     help="계획까지 돌려 ADG 를 만들어 본다 (Isaac 불필요)")
     ap.add_argument("--max-steps", type=int, default=400)
+    # --- lifelong -----------------------------------------------------------
+    ap.add_argument("--lifelong", action="store_true",
+                    help="주문 스트림으로 T틱 순환 (one-shot 대신)")
+    ap.add_argument("--horizon", type=int, default=315,
+                    help="lifelong 틱 수. 315틱 = 계획 420 s (1.2/0.9 s/틱)")
+    ap.add_argument("--seconds", type=float, default=None,
+                    help="틱 대신 초로 지정. --clock 과 함께 쓴다")
+    ap.add_argument("--clock", choices=("plan", "wall"), default="plan",
+                    help="plan=계획 시간, wall=Isaac 벽시계 (stretch 1.72 적용)")
+    ap.add_argument("--order-gap", type=int, default=15)
+    ap.add_argument("--battery", action="store_true",
+                    help="배터리·충전 도크")
     args = ap.parse_args()
 
     map_dir = os.path.abspath(args.map)
-    geom, free, starts, goals = setup(map_dir, args.n, args.pitch, args.seed, args.pool)
+    if args.lifelong:
+        geom, free, starts, goals = setup_lifelong(
+            map_dir, args.n, args.pitch, args.seed, args.pool)
+    else:
+        geom, free, starts, goals = setup(map_dir, args.n, args.pitch,
+                                          args.seed, args.pool)
 
     d = os.path.join(os.path.abspath(args.out), f"fleet_{args.n:02d}")
     os.makedirs(d, exist_ok=True)
@@ -483,17 +518,40 @@ def main():
         json.dump(starts_json(geom, starts), f, ensure_ascii=False, indent=1)
     with open(os.path.join(d, "scene.json"), "w", encoding="utf-8") as f:
         json.dump(dict(n=args.n, pitch=args.pitch, seed=args.seed, pool=args.pool,
-                       map=map_dir, heading_offset=GEOM_KW["heading_offset"]),
+                       map=map_dir, heading_offset=GEOM_KW["heading_offset"],
+                       mode="lifelong" if args.lifelong else "oneshot",
+                       horizon=args.horizon, battery=bool(args.battery)),
                   f, ensure_ascii=False, indent=1)
     print(f"[scene] 저장: {d}")
 
     if args.plan:
-        from isaac_drive import plan_and_build
-        adg, order, history, info = plan_and_build(free, starts, goals, geom,
-                                                   max_steps=args.max_steps)
+        if args.lifelong:
+            import metrics
+            from isaac_drive import plan_and_build_lifelong
+            horizon = args.horizon if args.seconds is None else                 metrics.horizon_for(args.seconds, geom, args.clock)
+            adg, order, history, info = plan_and_build_lifelong(
+                free, starts, goals, geom, horizon=horizon, seed=args.seed,
+                order_gap=args.order_gap, battery=args.battery,
+                docks=charge_docks(free, geom) if args.battery else ())
+        else:
+            from isaac_drive import plan_and_build
+            adg, order, history, info = plan_and_build(free, starts, goals, geom,
+                                                       max_steps=args.max_steps)
         print(f"[scene] {adg.summary()}")
         print(f"[scene] 액션 {info['actions']}")
         print(f"[scene] 스윕 감사 {info['sweep']}")
+        if "throughput" in info:
+            import metrics
+            print(metrics.fmt(info["throughput"]))
+            li = info["lifelong"]
+            print(f"[scene] 태스크 생성 {li['tasks_spawned']} · "
+                  f"완료 {li['tasks_done']} · 대기 {li['waiting']}")
+            if li.get("battery"):
+                print(f"[scene] 충전 {li['battery_charges']}회 · "
+                      f"소진 {li['battery_dead_robots']}대 · "
+                      f"최저 SoC {li['battery_soc_min']:.3f}")
+            for w in info.get("battery_warn") or []:
+                print("[scene] ★ " + w)
         with open(os.path.join(d, "trajectories.json"), "w", encoding="utf-8") as f:
             json.dump(traj_json(geom, history, args.pitch), f)
         print(f"[scene] trajectories.json 도 저장 (씬 빌더 --traj 용)")

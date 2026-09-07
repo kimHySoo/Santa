@@ -40,10 +40,21 @@ from pibt_core_v2 import (Replanner, Stagnation, dist_map_h, stay_map_h, step_h,
 # 로봇 상태 — FMS fms_kernel.py:31 과 같은 어휘
 IDLE, TO_PICK, SVC_PICK, TO_DROP, SVC_DROP, TO_HOME, FREED = \
     "IDLE", "TO_PICK", "SVC_PICK", "TO_DROP", "SVC_DROP", "TO_HOME", "FREED"
+
+# --- 배터리 상태 세 개 (battery.py 가 쓴다) --------------------------------
+#   TO_CHARGE    = 1 : 충전하러 가는 중. TO_DROP 과 같은 급 — 통로에서 죽으면
+#                      전체가 막히므로 집으러 가는 로봇(TO_PICK)보다 앞이다.
+#   TO_CHARGE_HI = 0 : 곧 방전된다. **길을 비켜줘야 한다.** 거리 임계치만으로는
+#                      도크 진입로에 끼인 채 방전되는 시드가 있었다. 밀려다니면
+#                      거리는 쓰는데 진행은 0이라 임계치로 못 막는다.
+#   CHARGING     = 0 : 도크에 꽂혀 있다. 밀려나면 안 된다 (SVC_* 와 같은 이유).
+TO_CHARGE, TO_CHARGE_HI, CHARGING = "TO_CHARGE", "TO_CHARGE_HI", "CHARGING"
+
 RANK = {SVC_PICK: 0, SVC_DROP: 0, TO_DROP: 1, TO_PICK: 2,
-        TO_HOME: 3, IDLE: 3, FREED: 3}
-NAV = (TO_PICK, TO_DROP, TO_HOME)
-SERVICE = (SVC_PICK, SVC_DROP)
+        TO_HOME: 3, IDLE: 3, FREED: 3,
+        TO_CHARGE: 1, TO_CHARGE_HI: 0, CHARGING: 0}
+NAV = (TO_PICK, TO_DROP, TO_HOME, TO_CHARGE, TO_CHARGE_HI)
+SERVICE = (SVC_PICK, SVC_DROP, CHARGING)
 
 SERVICE_TICKS = 3          # 픽/드롭 서비스 시간. FMS SERVICE_STEPS 와 같은 자리
 
@@ -233,7 +244,8 @@ class Kernel(object):
 
 def run_lifelong(free, starts, cells_by_cat, horizon=600, seed=0, order_gap=15,
                  shifts=("in", "out", "out"), edge_cost=None, wait_cost=None,
-                 turn_cost=None, turn_ticks=None, verbose=True):
+                 turn_cost=None, turn_ticks=None, verbose=True,
+                 kernel_cls=None, kernel_kw=None):
     """T틱까지 돌린다. **정체로 죽지 않는다** — 못 가는 로봇은 대기할 뿐이다.
 
     반환 (history, cells_hist, info). history 는 run_h 와 같은 형식이므로
@@ -241,7 +253,11 @@ def run_lifelong(free, starts, cells_by_cat, horizon=600, seed=0, order_gap=15,
     """
     rng = np.random.default_rng(seed)
     stream = OrderStream(rng, cells_by_cat, horizon, order_gap, shifts)
-    K = Kernel(free, starts, stream, edge_cost, wait_cost, turn_cost, turn_ticks)
+    # ★ 커널을 갈아 끼울 자리. 기본값이면 동작은 이전과 **완전히 같다**.
+    #   battery.BatteryKernel 이 이 훅으로 들어온다 — 이 파일에 배터리 코드가
+    #   섞이지 않게 하려는 것이다.
+    K = (kernel_cls or Kernel)(free, starts, stream, edge_cost, wait_cost,
+                               turn_cost, turn_ticks, **(kernel_kw or {}))
     history, cells_hist = [dict(K.states)], []
     for t in range(horizon):
         cells = K.step(t)
@@ -251,6 +267,8 @@ def run_lifelong(free, starts, cells_by_cat, horizon=600, seed=0, order_gap=15,
             "tasks_done": K.done, "waiting": len(K.waiting),
             "windows": stream.windows,
             "busy_robots": sum(1 for r in K.rb.values() if r["state"] != IDLE)}
+    if hasattr(K, "report"):
+        info.update(K.report())
     if verbose:
         print(f"[lifelong] T={horizon}틱  교대 {stream.windows}")
         print(f"[lifelong] 태스크 생성 {stream.n_task} · 완료 {K.done} · 대기 {len(K.waiting)}")

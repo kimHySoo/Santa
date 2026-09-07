@@ -1,8 +1,11 @@
 {
  "n": 12,
  "pitch": 1.2,
- "seed": 9,
+ "seed": 1,
  "pool": "cross",
  "map": "C:\\Users\\SSAFY\\workspace\\santa\\Santa\\warehouse\\map_fms",
- "heading_offset": 0
+ "heading_offset": 0,
+ "mode": "lifelong",
+ "horizon": 315,
+ "battery": true
 }
