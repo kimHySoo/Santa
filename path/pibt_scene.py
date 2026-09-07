@@ -66,6 +66,22 @@ sys.modules.setdefault("pibt_core", _pc)
 #   **회전이 많아지는 것은 9/4 선회 여유 결함과 겹치므로 주시해야 한다** —
 #   정점의 12.6%가 소인반경 기준 회전 불가다.
 
+# --- FMS 통로차단 ---
+# 랙 사이 통로는 피커 전용이라 로봇이 못 간다. lattice/grid 는 이미 막는데
+# 여기만 원본 마스크를 그대로 읽고 있었다 — 그러면 pibt_h 만 그 통로를 쓴다.
+# 규칙은 config 한 곳에만 둔다 (FMS map_loader 와 1:1).
+_CFG = None
+for _d in (os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "amr", "make_path"),
+           os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "amr", "make_path"),
+           os.path.dirname(os.path.abspath(__file__))):
+    if os.path.isfile(os.path.join(_d, "config.py")):
+        if _d not in sys.path:
+            sys.path.append(_d)
+        import config as _CFG                                  # noqa: E402
+        break
+
 from isaac_drive import RobotGeom                      # noqa: E402
 from pibt_core_v2 import valid_state, dist_map_h       # noqa: E402
 
@@ -120,6 +136,8 @@ def build_free(map_dir, pitch, mode="cross"):
         raise SystemExit(f"pitch 는 0.1 m 의 배수여야 합니다: {pitch}")
     mask = np.load(_pick(map_dir, "obstacle_mask.npy",
                          "obstacle_mask_wallA.npy")).astype(bool)
+    if _CFG is not None and getattr(_CFG, "AISLE_BLOCK", False):
+        mask = _CFG.apply_aisle_block(mask.copy())
     R, C = mask.shape
     r2, c2 = (R // k) * k, (C // k) * k
     blocks = (~mask[:r2, :c2]).reshape(r2 // k, k, c2 // k, k)   # True = 통행가능

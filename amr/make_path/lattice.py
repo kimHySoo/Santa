@@ -35,7 +35,8 @@ from collections import deque
 
 import numpy as np
 
-from config import GRID_M, MOVES_4, PLAN_SAFETY_DIST
+from config import (AISLE_BLOCK, GRID_M, MOVES_4, PLAN_SAFETY_DIST,
+                    apply_aisle_block)
 
 # 정점 간격 [m]. PLAN_SAFETY_DIST(2.365) 이상이어야 "다른 정점 = 안전"이 성립한다.
 PITCH = 2.4
@@ -64,11 +65,16 @@ class Lattice:
     adj[v][d] = w or -1        방향 d(MOVES_4 인덱스)로 이동했을 때의 정점
     """
 
-    def __init__(self, map_dir, pitch=PITCH, origin=ORIGIN):
+    def __init__(self, map_dir, pitch=PITCH, origin=ORIGIN, aisle_block=None):
         self.pitch = pitch
         self.origin = origin
         mask = np.load(_pick(map_dir, "obstacle_mask.npy",
                              "obstacle_mask_wallA.npy")).astype(bool)
+        # 랙 사이 통로는 피커 전용이라 로봇이 못 간다 — FMS 와 같은 규칙을 쓴다.
+        # 끄면 옛 숫자(정점 411 등)가 재현되지만 FMS 와 비교할 수 없다.
+        self.aisle_block = AISLE_BLOCK if aisle_block is None else aisle_block
+        if self.aisle_block:
+            mask = apply_aisle_block(mask.copy())
         self.free_fine = ~mask
         self.R, self.C = mask.shape
         self._build()

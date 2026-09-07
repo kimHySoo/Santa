@@ -7,8 +7,25 @@ import sys
 from . import MAKE_PATH, ROOT, default_map
 
 
-def run(argv, cwd=MAKE_PATH):
-    """make_path 의 CLI 를 그대로 실행한다. 실패하면 예외."""
+# 계획 스크립트가 있을 수 있는 폴더. 배치가 두 가지다 —
+#   amr/make_path/   계획기 본체 (로컬 원본)
+#   path/            실행·계획 모듈 (서버 재구성 후 배치. pibt_scene 등이 여기 있다)
+# 어느 쪽에 있든 돌아가야 한다. 러너(live_*.py)가 BASE 와 BASE/path 를 모두 보는
+# 것과 같은 이유다 — 한쪽만 보면 배치가 바뀔 때 조용히 깨진다 (2026-09-07).
+SCRIPT_DIRS = (MAKE_PATH, os.path.join(ROOT, "path"))
+
+
+def script_dir(name):
+    """스크립트가 실제로 있는 폴더. 없으면 MAKE_PATH."""
+    for d in SCRIPT_DIRS:
+        if os.path.isfile(os.path.join(d, name)):
+            return d
+    return MAKE_PATH
+
+
+def run(argv, cwd=None):
+    """계획기 CLI 를 그대로 실행한다. 실패하면 예외."""
+    cwd = cwd or script_dir(argv[0])
     cmd = [sys.executable] + argv
     print("  $ " + " ".join(cmd))
     r = subprocess.run(cmd, cwd=cwd, text=True, encoding="utf-8",

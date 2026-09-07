@@ -54,5 +54,19 @@ def get(name):
 
 
 def default_map():
+    """기본 맵 = **FMS 공식 맵**. (2026-09-07, fms 중심 전환)
+
+    이전 기본값은 팀 v5.9(`v2/upstream/.../t3_warehouse_map/map`)였다. FMS 는
+    2026-09-04 부터 `3_FMS/map` 을 공식 맵으로 쓰고 그쪽 기준값이 전부 그 맵에서
+    나온다. 기본값이 갈려 있으면 같은 명령이 조용히 다른 맵으로 계획된다.
+
+    두 맵의 차이 (2026-09-06 실측): 격자 정점 617 → 411. 남측 블록(y ≤ 38.7)이
+    통째로 없다 — 9/3 교착과 9/4 선회 결함이 나던 그 통로다.
+    """
+    for d in (os.path.join(ROOT, "warehouse", "map_fms"),      # 서버 재구성 후
+              os.path.join(ROOT, "v2", "map_fms"),             # 로컬
+              os.path.join(ROOT, "fms", "map")):               # FMS 원본 사본
+        if os.path.isfile(os.path.join(d, "obstacle_mask.npy")):
+            return d
     return os.path.join(ROOT, "v2", "upstream", "2_Simulation",
                         "t3_warehouse_map", "map")

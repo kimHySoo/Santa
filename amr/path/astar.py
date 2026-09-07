@@ -14,14 +14,15 @@ USD = "astar%d.usd"
 
 
 def plan(n=12, seed=None, seconds=420, map_dir=None, extra=None):
-    # generate.py 에는 --map 이 없다 (기본 맵 고정). map_dir 은 무시된다.
+    # generate.py 의 맵 인자 이름은 --map 이 아니라 --file1 이고, 기본값은
+    # 지금 없는 폴더(`file_1`)를 가리킨다. 그래서 명시적으로 넘긴다 —
+    # 안 넘기면 "맵 파일을 찾을 수 없습니다" 로 죽는다 (2026-09-07).
     argv = ["generate.py", "--fleet", str(n), "--seconds", str(seconds),
-            "--out", rel(OUT)]
+            "--file1", map_dir or default_map(), "--out", rel(OUT)]
     if seed is not None:
         argv += ["--seed", str(seed)]
     out = run(argv + (extra or []))
-    return {"out": os.path.join(rel(OUT), f"fleet_{n:02d}"), "log": out,
-            "note": "generate.py 는 --map 을 받지 않는다 — 기본 맵으로 계획됨"}
+    return {"out": os.path.join(rel(OUT), f"fleet_{n:02d}"), "log": out}
 
 
 def verify(n=12, map_dir=None):

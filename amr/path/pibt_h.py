@@ -12,16 +12,18 @@ OUT = "v2/traj_pibt_h"
 SUB = "traj_pibt_h"   # 서버 $PLAN 아래 폴더명
 USD = "pibt%d.usd"
 PITCH = 1.2
-SEED = 5      # develop 판에서 완주. 이전 기본값 9 는 정체한다
+SEED = 1      # FMS 공식 맵 + 통로차단에서 완주
 # 12대·pitch 1.2·max_steps 400 에서 계획이 완주하는 시드 (2026-09-07, 24시드 전수).
-# FMS develop 판 pibt_core 기준. 판이 바뀌면 이 목록도 바뀐다 —
-# 미머지판+1/3 에서는 4·5·9·10·15·22 였다.
-GOOD_SEEDS = (5, 10, 11, 15)
+# **맵이 바뀌면 이 목록도 바뀐다.** 기준: FMS 공식 맵 + 통로차단 ON, develop pibt_core.
+#   v5.9 맵·차단 없음이었을 때는 5·10·11·15 였다 — 그 값으로 돌리면 정체한다.
+GOOD_SEEDS = (1, 4, 16, 18, 21)
 
 
-def plan(n=12, seed=9, seconds=None, map_dir=None, extra=None):
+def plan(n=12, seed=None, seconds=None, map_dir=None, extra=None):
+    # 기본 시드는 모듈 상수 SEED 를 쓴다. 여기에 숫자를 또 박아 두었더니
+    # `main.py plan` 이 SEED 를 바꿔도 옛 값으로 계획했다 (2026-09-07).
     argv = ["pibt_scene.py", "--n", str(n), "--pitch", str(PITCH),
-            "--seed", str(seed if seed is not None else 9),
+            "--seed", str(SEED if seed is None else seed),
             "--map", map_dir or default_map(), "--out", rel(OUT), "--plan"]
     out = run(argv + (extra or []))
     return {"out": os.path.join(rel(OUT), f"fleet_{n:02d}"), "log": out,

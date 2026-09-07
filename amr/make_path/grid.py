@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 
-from config import DS, PLAN_CELL
+from config import AISLE_BLOCK, DS, PLAN_CELL, apply_aisle_block
 
 
 def _pick(map_dir, *names):
@@ -28,6 +28,9 @@ def load_free(file1_dir):
     """
     mask = np.load(_pick(file1_dir, "obstacle_mask.npy",
                      "obstacle_mask_wallA.npy")).astype(bool)
+    if AISLE_BLOCK:
+        # 랙 사이 통로 = 피커 전용. FMS map_loader 와 같은 규칙 (config 참조)
+        mask = apply_aisle_block(mask.copy())
     rows, cols = mask.shape
     r2, c2 = (rows // DS) * DS, (cols // DS) * DS
     blocked = mask[:r2, :c2].reshape(r2 // DS, DS, c2 // DS, DS).max(axis=(1, 3))
