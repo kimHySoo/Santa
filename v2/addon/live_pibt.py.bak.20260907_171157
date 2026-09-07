@@ -531,48 +531,6 @@ async def _run():
         carb.log_warn(f"[pibt] camera: {e}")
 
     # --- 계획 (Isaac 불필요, 순수 numpy — 로컬과 같은 시드면 같은 결과) ---
-    import os as _os
-
-    # --- 경량 모드 (patch_lite.py 삽입) ---
-    #
-    # `main.py` 는 `--lite` 에 대해 env["LIVE_LITE"]="1" 을 넘기는데, 이 파일이
-    # 그것을 읽지 않아 **pibt 경로에서 --lite 가 조용히 무시되고 있었다.**
-    #
-    # MakeInvisible() 은 렌더만 끄고 CollisionAPI 는 건드리지 않는다.
-    # -> 물리 결과가 전혀 바뀌지 않는다. 겹침 0 · 완주 검증은 그대로 유효하다.
-    #    시연 : --lite 없이 (랙이 보여야 한다)
-    #    측정 : --lite 로  (렌더 비중을 재는 유일한 수단)
-    if _os.environ.get("LIVE_LITE", "0") not in ("0", "", "false", "False"):
-        _groups = [g.strip() for g in _os.environ.get(
-            "LIVE_LITE_HIDE",
-            "racks,cargo_b,office_furniture,markings,pallets,anchors"
-        ).split(",") if g.strip()]
-        try:
-            import omni.usd as _ou
-            from pxr import UsdGeom as _UG
-            _st = _ou.get_context().get_stage()
-            _hid, _miss = [], []
-            for _g in _groups:
-                for _base in ("/World/Warehouse", "/World"):
-                    _pr = _st.GetPrimAtPath(_base + "/" + _g)
-                    if _pr and _pr.IsValid():
-                        _UG.Imageable(_pr).MakeInvisible()
-                        _hid.append(_g)
-                        break
-                else:
-                    _miss.append(_g)
-            carb.log_warn("[pibt] 경량 모드 ON — 숨김 %d개 그룹: %s"
-                          % (len(_hid), ", ".join(_hid)))
-            carb.log_warn("[pibt]   물리는 동일 (충돌 유지). 시연 영상용으로 쓰지 말 것")
-            if _miss:
-                carb.log_warn("[pibt]   ★ 못 찾은 그룹: %s — 이름을 확인하세요"
-                              % ", ".join(_miss))
-            if not _hid:
-                carb.log_warn("[pibt]   ★ 숨긴 것이 없다 — 측정값이 무의미하다")
-        except Exception as _e:
-            carb.log_error("[pibt] 경량 모드 실패: %r" % (_e,))
-    # --- 경량 모드 끝 ---
-
     import pibt_scene as PS
     from isaac_drive import (DifferentialDriver, FleetController, plan_and_build,
                              plan_and_build_lifelong)
