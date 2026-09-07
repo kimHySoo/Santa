@@ -651,13 +651,34 @@ def build_adg(chains: list[list[Action]]) -> ADG:
 
 
 class AdgRuntime:
-    """실행 중의 ADG 상태. 시간을 전혀 모른다 — 완료 이벤트만 안다."""
+    """실행 중의 ADG 상태. 완료 이벤트 + (선택) 출발 하한.
 
-    def __init__(self, adg: ADG):
+    ``tick_s`` 를 주면 액션이 `계획틱 x tick_s` **이전에는 시작하지 않는다.**
+    선행 조건을 대체하지 않고 **더한다.**
+
+    왜 필요한가: `extract_actions` 는 대기를 버리고 ADG 는 순서만 남긴다.
+    one-shot 에서는 그게 장점이지만(절대 시각을 버려야 지연에 강해진다),
+    lifelong 에서는 버려지는 시각이 **주문 도착 시각**이다. 그대로 두면
+    420 초에 걸쳐 도착할 태스크가 전부 t=0 에 시작하고, 12대가 2.3 초 안에
+    한꺼번에 출발한다 (2026-09-07 실측, 버려진 대기 액션 1,329개).
+
+    이르게 시작하는 것만 막으므로 늦은 로봇은 더 늦어지지 않는다 — ADG 의
+    지연 복구는 그대로다. 실측 대가: stretch 1.72 에서 makespan +0.0%.
+    """
+
+    def __init__(self, adg: ADG, tick_s: float | None = None):
         self.adg = adg
         self.done: set[int] = set()
         self.next_idx = {i: 0 for i in range(len(adg.chains))}
         self.blocked_cells: set[Cell] = set()          # 장애물 보고로 막힌 칸
+        self.tick_s = tick_s        # None 이면 예전 동작 (시각 무시)
+        self.clock = 0.0
+
+    def advance(self, dt: float) -> None:
+        self.clock += float(dt)
+
+    def release_time(self, action: Action) -> float:
+        return 0.0 if self.tick_s is None else action.tick * self.tick_s
 
     def pending(self, i: int) -> Action | None:
         k = self.next_idx[i]
@@ -667,11 +688,16 @@ class AdgRuntime:
     def can_start(self, action: Action) -> bool:
         if action.cells & self.blocked_cells:
             return False                               # 장애물이 경로 위
+        if self.clock + 1e-9 < self.release_time(action):
+            return False                               # 아직 주문이 안 왔다
         return all(u in self.done for u in self.adg.preds[action.uid])
 
     def blocking(self, action: Action) -> list[int]:
-        """왜 못 시작하는지 — 진단용."""
-        return [u for u in self.adg.preds[action.uid] if u not in self.done]
+        """왜 못 시작하는지 — 진단용. 하한 대기 중이면 [-1] 을 앞에 붙인다."""
+        out = [u for u in self.adg.preds[action.uid] if u not in self.done]
+        if self.clock + 1e-9 < self.release_time(action):
+            out = [-1] + out
+        return out
 
     def complete(self, i: int, action: Action) -> None:
         self.done.add(action.uid)
@@ -944,9 +970,13 @@ class FleetController:
     def __init__(self, geom: RobotGeom, adg: ADG, drivers: dict[int, RobotDriver],
                  order: Sequence[int] | None = None, tol: Tolerance | None = None,
                  safety_check: bool = True, action_timeout: float = 60.0,
-                 starts: dict[int, State] | None = None):
+                 starts: dict[int, State] | None = None,
+                 release: bool = False):
         self.g = geom
-        self.rt = AdgRuntime(adg)
+        # release=True 면 계획의 출발 시각을 지킨다 (lifelong 에서 필수).
+        # one-shot 은 도착 시각이라는 개념이 없으니 기본값 False 로 둔다.
+        self.rt = AdgRuntime(adg, tick_s=(geom.pitch / geom.v_max) if release
+                             else None)
         self.drivers = drivers
         # chains의 인덱스 = extract_actions가 쓴 agent 순서. 명시적으로 받는다.
         self.order = list(order) if order is not None else sorted(drivers)
@@ -1036,6 +1066,7 @@ class FleetController:
     def step(self, dt: float) -> None:
         self.stats.steps += 1
         self.stats.sim_time += dt
+        self.rt.advance(dt)
         moved = False
         occ: dict[int, frozenset[Cell]] = {}
 

@@ -625,7 +625,8 @@ async def _run():
     #   재정렬이 통했으면 엄격하게(11도), 실패했으면 probe 잔여를 감안해
     #   느슨하게(26도) 본다. 느슨하게 갈 때는 그 사실을 로그에 남긴다 —
     #   조용히 완화하면 검사가 있는 의미가 없다.
-    fleet = FleetController(geom, adg, drivers, order=order)
+    fleet = FleetController(geom, adg, drivers, order=order,
+                            release=(MODE == "lifelong"))
     fleet.starts = history[0]
     yaw_tol = 0.20 if not nfail else 0.45
     if nfail:
