@@ -3,7 +3,7 @@
  "pitch": 1.2,
  "seed": 1,
  "pool": "cross",
- "map": "C:\\Users\\SSAFY\\workspace\\santa\\Santa\\warehouse\\map",
+ "map": "/home/j-j15a106/khs/wh/warehouse/map",
  "heading_offset": 0,
  "mode": "lifelong",
  "horizon": 315,
