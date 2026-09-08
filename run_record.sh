@@ -16,7 +16,7 @@
 #   SHOT_STRIDE=20   몇 물리스텝마다 한 장 (기본 20)
 #   WATCH_SEC=420    촬영 확인까지 대기 (기본 420초)
 #   ISOLATE=0        GPU 격리 해제 (기본은 CUDA_VISIBLE_DEVICES=$GPU)
-#   FINISH_GRACE=90  완주(post_quit) 표시 뒤 정상 종료를 기다리는 초 (기본 90)
+#   FINISH_GRACE=5   완주(post_quit) 표시 뒤 끊기까지 초 (기본 5, 0 = 즉시)
 #   IDLE_KILL=300    프레임이 이만큼 안 늘면 끝난 것으로 보고 끊는다 (기본 300)
 #   SHOT_FPS=30      출력 fps (기본 30)
 #   SHOT_EXT=png     png | jpg
@@ -222,9 +222,12 @@ WATCH=$!
 #
 #   ★ typescript 만 믿으면 안 된다 — 즉시 flush 되지 않는다 (이 파일 위쪽 실측).
 KITLOG_DIR="$HOME/.nvidia-omniverse/logs/Kit"
-FINISH_GRACE="${FINISH_GRACE:-90}"    # 완주 표시 뒤 이만큼은 정상 종료를 기다린다
+FINISH_GRACE="${FINISH_GRACE:-5}"     # 완주 표시 뒤 이만큼만 기다린다 (마지막 PNG 비동기 쓰기 몫).
+                                      # 90초였는데 정상 종료가 성공한 적이 한 번도 없어 줄였다 (2026-09-08).
+                                      # 0 으로 주면 즉시 끊는다.
 IDLE_KILL="${IDLE_KILL:-300}"         # 프레임이 이만큼 안 늘면 끝난 것으로 본다
-POLL=15
+POLL=2                                 # 표시 확인 주기. script -f 라 typescript 가 즉시 반영된다
+SLOW_EVERY=7                           # 무거운 확인(Carb 로그 grep · 프레임 세기)은 7회마다 = 약 14초
 
 _kit_alive() {
     for p in $(pgrep -u "$ME" -f "$KITPAT" 2>/dev/null); do
@@ -236,25 +239,37 @@ _kit_alive() {
     return 1
 }
 
-( marker_at=0; idle=0; prev=-1
+( marker_at=0; idle=0; prev=-1; slow=0; n=0
   while sleep "$POLL"; do
       _kit_alive || exit 0                       # 스스로 잘 끝났다
 
-      n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
-      if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
-          idle=$((idle + POLL))
-      else
-          idle=0
-      fi
-      prev="$n"
-
+      # ── 매 회(2초): 완주 표시 — 이것만 빠르면 된다 ──────────
       seen=0
-      grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null && seen=1
-      if [ "$seen" = 0 ] && [ -d "$KITLOG_DIR" ]; then
-          # 무버퍼 로그. 최근 것만 본다 (런당 124 MB 라 전수는 비싸다).
-          for L in $(ls -t "$KITLOG_DIR"/*/*/kit_*.log 2>/dev/null | head -3); do
-              grep -aq "post_quit" "$L" 2>/dev/null && { seen=1; break; }
-          done
+      if [ "$marker_at" = 0 ]; then
+          grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null && seen=1
+      fi
+
+      # ── 7회마다(약 14초): 무거운 확인 ───────────────────────
+      slow=$((slow + 1))
+      if [ "$slow" -ge "$SLOW_EVERY" ]; then
+          slow=0
+          n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
+          if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
+              idle=$((idle + POLL * SLOW_EVERY))
+          else
+              idle=0
+          fi
+          prev="$n"
+      fi
+      if [ "$seen" = 0 ] && [ "$marker_at" = 0 ] && [ "$slow" = 0 ] && [ -d "$KITLOG_DIR" ]; then
+          # 무버퍼 로그. 최근 10분 안에 쓰인 파일만 본다 (런당 124 MB, 전수는 비싸다).
+          # ★ `for L in $(ls ...)` 는 폴더 이름에 공백이 있으면 경로가 깨져 grep 이
+          #   조용히 실패한다 — 2026-09-08 15:13 런에서 표시 경로가 안 잡힌 원인 후보.
+          #   find -exec 는 단어 분리를 하지 않는다.
+          if [ -n "$(find "$KITLOG_DIR" -name 'kit_*.log' -mmin -10 \
+                     -exec grep -la "post_quit" {} + 2>/dev/null | head -1)" ]; then
+              seen=1
+          fi
       fi
       [ "$seen" = 1 ] && [ "$marker_at" = 0 ] && marker_at=$(date +%s)
 
@@ -267,15 +282,18 @@ _kit_alive() {
       fi
       [ -z "$why" ] && continue
 
-      echo
-      echo "──────────── 자동 종료 ────────────"
-      echo "$why."
-      echo "Kit 종료 지연으로 보고 끊습니다 (GLFW 종료 경로 결함, 2026-09-08 실측)."
-      echo "프레임은 남아 있으니 영상은 그대로 만들어집니다."
+      # `script` 가 터미널을 raw 모드로 잡고 있어 `\n` 만 찍으면 줄이 오른쪽으로
+      # 밀린다 (2026-09-08 실측). `\r\n` 으로 찍는다.
+      say() { printf '%s\r\n' "$*"; }
+      say
+      say "──────────── 자동 종료 ────────────"
+      say "$why."
+      say "Kit 종료 지연으로 보고 끊습니다 (GLFW 종료 경로 결함, 2026-09-08 실측)."
+      say "프레임은 남아 있으니 영상은 그대로 만들어집니다."
       pkill -u "$ME" -INT -f "$KITPAT" 2>/dev/null
       for _ in $(seq 20); do sleep 1; _kit_alive || break; done
       if _kit_alive; then
-          echo "SIGINT 로 안 죽어 SIGKILL 을 보냅니다."
+          say "SIGINT 로 안 죽어 SIGKILL 을 보냅니다."
           pkill -u "$ME" -KILL -f "$KITPAT" 2>/dev/null
       fi
       exit 0
@@ -289,7 +307,11 @@ FINWATCH=$!
 #   빈 폴더를 하나 더 만들고 끝에 "프레임이 없습니다" 를 찍는다 — 조립 섹션이 두 번
 #   나와 헷갈린다. `SHOTS=0` 이면 run.sh 가 그 분기를 통째로 건너뛴다.
 #   촬영은 위에서 export 한 `PIBT_*` 가 담당한다.
-script -q -e -c "SHOTS=0 bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG"
+# ★ `-f` (flush) — 없으면 `script` 가 typescript 를 블록 버퍼링해서, 감시가 읽는
+#   로그가 수 분 늦는다. 2026-09-08 15:13 런에서 `post_quit` 표시(90초 경로)를 못 읽고
+#   프레임 정체(300초 경로)로 잡힌 원인. 앞서 "typescript 가 즉시 flush 안 된다"고
+#   실측해 놓고 원인을 안 고쳤던 것.
+script -q -f -e -c "SHOTS=0 bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG"
 rc=$?
 kill "$WATCH" "$FINWATCH" 2>/dev/null
 echo
