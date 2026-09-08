@@ -54,16 +54,20 @@ def get(name):
 
 
 def default_map():
-    """기본 맵 = **Isaac 씬과 같은 창고**의 맵.
+    """기본 맵 = `warehouse/map`. **2026-09-08 부터 FMS 맵과 같다.**
 
-    ★ `map_fms` 를 기본으로 두면 안 된다 (2026-09-07).
-      `warehouse/map`(팀 v5.9)과 `warehouse/map_fms`(FMS 공식)는 **서로 다른
-      창고**다. 마스크가 다르고 packing 좌표가 y=33.8 vs 40.4 로 다르다.
-      Isaac 씬(`$SCENE` = warehouse_scene.usd)의 기하는 앞의 것이므로,
-      map_fms 로 계획해서 그 씬에서 주행하면 **로봇이 보이는 랙을 통과한다.**
+    격자·마스크가 `3_FMS/map` 과 바이트 동일하고, `stations.json` 은 FMS 값에
+    우리 이름 `handoff`(= FMS 의 `input`+`output`) 하나만 더한 것이다.
+    `warehouse/map_fms` 와는 이제 사실상 중복이다.
 
-    map_fms 는 FMS 궤적을 받아 재생하는 `fms` 계획기에서만 쓴다 — 그때는
-    씬도 그쪽 기하로 지어야 한다.
+    ★ 씬은 아직 안 맞는다. `warehouse_scene.usd` 의 컨베이어·작업대는 옛
+      격자(작업 라인 y=33.8·30.2)로 세운 것이라, 지금 계획하면 로봇이 y=40.4
+      의 **빈 바닥**으로 간다. 충돌은 없지만 영상으로는 말이 안 된다.
+      씬을 다시 지으려면 `rack_units.npy`·`columns.npy` 가 필요한데 FMS 는
+      계획만 하므로 그 둘을 안 만든다 — 맵 파트 요청 대기 중이다.
+      (경위와 요청 내용은 warehouse/map/NOTE.md)
+
+    시연 영상이 급하면 `warehouse/map/*.bak.20260908_170003` 으로 되돌린다.
     """
     for d in (os.path.join(ROOT, "warehouse", "map"),        # 서버 재구성 후
               os.path.join(ROOT, "v2", "upstream", "2_Simulation",

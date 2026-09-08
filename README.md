@@ -39,6 +39,87 @@ Santa/
 
 ---
 
+## 주행 파이프라인 — 계획에서 바퀴까지 (`pibt_h`)
+
+```
+pibt_core.run_h()  →  extract_actions  →  build_adg  →  AdgRuntime  →  드라이버  →  Isaac
+   (팀 코어)                        (우리, path/isaac_drive.py)
+```
+
+`--planner pibt_h` 만 이 경로를 탄다 (`DRIVE = "adg"`). `wppl`·`astar`·`fms` 는
+`DRIVE = "time"` 이라 궤적 JSON 의 **시각**을 추종한다 (`path/amr_driver_v2.py`).
+
+### 1. 계획 — 틱 단위 상태열
+
+`path/pibt_scene.py` 가 맵을 PIBT 형태로 바꾸고, `path/lifelong.py` 의
+`run_lifelong()` 이 매 틱 `step_h()` 를 돌린다. 결과는 `history` — **틱마다
+로봇별 `State(r, c, h)`**. 위치와 바라보는 방향뿐이고, 아직 시간표다.
+
+### 2. 액션 추출 — 시간표를 버린다
+
+`extract_actions(history, geom)` ([isaac_drive.py:539](path/isaac_drive.py#L539))
+
+연속된 상태 차이를 `classify()` 로 분류해 `Action` 으로 묶는다 (전진 / 회전 /
+후진). **대기는 버린다** — "몇 틱 기다린다"를 "누구 다음에 간다"로 바꾸는 것이
+목적이다. 로봇마다 액션 한 줄 = `chains[i]`.
+
+### 3. ADG — 순서만 남긴다
+
+`build_adg(chains)` ([isaac_drive.py:624](path/isaac_drive.py#L624))
+
+같은 칸을 쓰는 액션들 사이에 간선을 건다. 규칙 하나 — **계획에서 A 가 그 칸을
+먼저 썼으면, 실행에서도 A 가 끝나야 B 가 시작한다.**
+
+여기서 쓰는 칸은 코어의 `cells_hist` 가 **아니라** `RobotGeom.swept_cells()` 다.
+코어 점유는 틱 경계에서만 맞아서, 회전 중 차체가 쓸고 지나가는 칸이 빠진다.
+
+| ADG 를 지은 근거 | 12대 주행 | 차체 겹침 |
+|---|---|---|
+| `cells_hist` (틱 동기 점유) | 12대 | 발생 |
+| `swept_cells` (실제 스윕) | 12대 | **0** |
+
+만든 뒤 `topological_order()` 로 순환을 검사한다. 순환이면 데드락이므로 그
+자리에서 던진다 — `plan_and_build_lifelong` 이 `RuntimeError` 를 낸다.
+
+### 4. 런타임 — 조건이 맞은 액션만 내보낸다
+
+`AdgRuntime` ([isaac_drive.py:653](path/isaac_drive.py#L653)) 가 프레임마다 판단한다.
+
+```python
+def can_start(self, action):
+    if action.cells & self.blocked_cells:        return False   # 장애물 보고
+    if self.clock < self.release_time(action):   return False   # 주문이 아직
+    return all(u in self.done for u in self.adg.preds[action.uid])
+```
+
+셋째가 ADG 본체, 둘째가 **릴리스 바닥**이다. lifelong 에서 버려진 대기 시각이
+곧 주문 도착 시각이라, 그냥 두면 420초에 걸쳐 올 태스크가 전부 t=0 에 몰려
+12대가 2.3초 안에 다 출발한다 (2026-09-07 실측, 버려진 대기 액션 1,329개).
+`tick × tick_s` 보다 이르게만 막으므로 **늦는 것은 안 막는다** — ADG 의 지연
+복구는 그대로다 (대가: stretch 1.72 에서 makespan +0.0%).
+
+### 5. 주행 — 액션 하나를 바퀴 속도로
+
+`FleetController.step(dt)` ([isaac_drive.py:957](path/isaac_drive.py#L957)) 가 매
+물리 스텝마다,
+
+1. 로봇마다 `pending()` 액션을 꺼내 `can_start()` 를 묻는다
+2. 되면 `MotionController` 가 목표 자세를 잡고 `DifferentialDriver` 가 좌우 바퀴
+   각속도를 쓴다
+3. 도달 판정이 서면 `complete()` → 후속 액션이 풀린다
+
+`v2/addon/live_pibt.py` 는 Isaac 루프 안에서 `fleet.step(dt)` 만 부른다.
+
+### 왜 이렇게 하나
+
+**시간표가 아니라 순서로 돌기 때문에** 로봇 하나가 미끄러지거나 늦어도 뒤차가
+그만큼 기다린다. 시각 추종이면 늦은 차를 앞질러 가서 겹친다.
+
+ADG 는 `fms/` 에 **없다.** 팀 코어는 계획까지만 하고, 이 계층은 Isaac 쪽에서
+우리가 얹은 것이다.
+
+---
+
 ## 루트 — 실행 스크립트
 
 | 파일 | 하는 일 |
@@ -79,8 +160,8 @@ Santa/
 `DRIVE` 가 `time` 이면 궤적 JSON 의 **시각**을 추종하고(`amr_driver_v2`),
 `adg` 면 ADG 의 **순서**를 따른다(`isaac_drive`).
 
-`default_map()` 은 **`warehouse/map`** 을 돌려준다. `map_fms` 를 기본으로 두면
-로봇이 보이는 랙을 통과한다 — 서로 다른 창고다 (2026-09-07).
+`default_map()` 은 **`warehouse/map`** 을 돌려준다. 2026-09-08 부터 그 맵이 곧
+FMS 맵이다 — 씬이 아직 안 따라왔다 (`todo/2026-09-08_asset_이동.md`).
 
 ### `amr/make_path/` — 계획기 본체 (로컬 원본)
 
@@ -174,13 +255,20 @@ Isaac 의 `--exec` 로 들어가는 스크립트. **Isaac 내부 python 에서�
 | `scene/roof_structure.py` | 박공지붕 + 상부 철골 + H형강 기둥 (설계도 실측 기하) |
 | `scene/view_scene.py` | 씬 뷰어 (WebRTC 관전 전용) |
 | `scene/README.md` | 씬 빌드 절차 |
-| `map/` | **기본 맵**(`$MAP`, v5.9). `occupancy_grid.npy` · `obstacle_mask.npy` · `stations.json` — Isaac 씬과 **일치** |
-| `map_fms/` | FMS 공식 맵(9/4). packing y=40.4. `fms` 계획기 전용 |
-| `map_official/` | FMS 벽있는 맵. **계획 전용** — 씬과 불일치. 근거는 `NOTE.md` |
+| `map/` | **기본 맵**(`$MAP`). 2026-09-08 부터 **FMS 기준** — 격자·마스크가 `3_FMS/map` 과 바이트 동일. 경위는 `NOTE.md` |
+| `map_fms/` | FMS 공식 맵(9/4). 이제 `map/` 과 중복 — 정리 대상 |
+| `map_official/` | FMS **벽있는** 맵. 계획 전용 |
 | `robots/` | iw.hub 에셋 236 MB. **git 제외** — `v2/server/fetch_iwhub.py` 로 받는다 |
 
-`map` 과 `map_fms` 는 **서로 다른 창고다.** 마스크가 다르고 packing 이
-y=33.8 vs 40.4. 계획한 맵과 세운 씬이 어긋나면 로봇이 랙을 통과한다.
+**★ 씬은 아직 안 맞는다.** `warehouse_scene.usd` 의 컨베이어·작업대는 옛
+격자(작업 라인 y=33.8·30.2)로 세운 것이라, 지금 계획하면 로봇이 y=40.4 의
+**빈 바닥**으로 간다. 충돌은 없다(FMS 통행영역 ⊂ 우리 통행영역).
+
+씬 기하는 `stations.json` 이 아니라 **`occupancy_grid.npy` 의 셀값 5** 에서
+나온다 (`build_scene.py`: "그리드가 곧 씬이다"). 다시 지으려면
+`rack_units.npy`·`columns.npy` 가 필요한데 FMS 는 계획만 하므로 안 만든다 —
+**맵 파트 요청 대기 중**이다. 시연이 급하면
+`warehouse/map/*.bak.20260908_170003` 으로 되돌린다.
 
 ---
 
