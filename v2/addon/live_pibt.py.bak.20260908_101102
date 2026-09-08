@@ -417,34 +417,6 @@ def _shot_report():
                   f"-c:v libx264 -pix_fmt yuv420p -crf 20 ../demo.mp4")
 
 
-
-def _quit(code=0):
-    """완주·중단 뒤 Kit 앱을 종료한다 (patch_autoquit.py).
-
-    `state["done"] = True` 는 tick 만 멈춘다. 앱은 계속 돌면서 GPU 를 쥐고,
-    로그를 쓰고, stdout 버퍼를 플러시하지 않는다. 여기서 실제로 끝낸다.
-
-    멱등이다 — 물리 콜백이 계속 불려도 한 번만 요청한다.
-    """
-    if state.get("quitting"):
-        return
-    state["quitting"] = True
-    if _os.environ.get("PIBT_AUTOQUIT", "1") in ("0", "", "false", "False"):
-        carb.log_warn("[pibt] PIBT_AUTOQUIT=0 — 앱을 종료하지 않는다 "
-                      "(GPU·로그를 계속 점유한다)")
-        return
-    try:
-        state["sub"] = None                      # 물리 콜백 해지
-    except Exception:
-        pass
-    try:
-        import omni.kit.app
-        omni.kit.app.get_app().post_quit(int(code))
-        carb.log_warn("[pibt] 앱 종료 요청 (post_quit)")
-    except Exception as e:
-        carb.log_error(f"[pibt] 종료 요청 실패: {e!r} "
-                       "— 수동으로 끊어야 한다 (pkill -u $USER -f isaacsim)")
-
 def _on_physics(dt):
     """물리 스텝 콜백.
 
@@ -454,8 +426,6 @@ def _on_physics(dt):
     """
     f = state["fleet"]
     if f is None or state["done"]:
-        if state["done"]:
-            _quit()          # ★ tick 만 멈추지 말고 앱을 끝낸다
         return
     try:
         _tick(f, dt)
