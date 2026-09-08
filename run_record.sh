@@ -207,7 +207,13 @@ trap assemble EXIT
 WATCH=$!
 
 # ── 주행 ────────────────────────────────────────────────────
-script -q -e -c "bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG"
+# ★ `SHOTS=0` 은 **자식에만** 준다 (이 스크립트의 $SHOTS 는 mkdir·감시·조립이 쓴다).
+#   `run.sh` 는 `SHOTS`/`SHOT_*` 를 export 하는데 `live_pibt.py` 는 `PIBT_*` 를 읽는다
+#   (접두사 불일치, 2026-09-08 확인). 그래서 run.sh 의 촬영은 어차피 동작하지 않으면서
+#   빈 폴더를 하나 더 만들고 끝에 "프레임이 없습니다" 를 찍는다 — 조립 섹션이 두 번
+#   나와 헷갈린다. `SHOTS=0` 이면 run.sh 가 그 분기를 통째로 건너뛴다.
+#   촬영은 위에서 export 한 `PIBT_*` 가 담당한다.
+script -q -e -c "SHOTS=0 bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG"
 rc=$?
 kill "$WATCH" 2>/dev/null
 echo
