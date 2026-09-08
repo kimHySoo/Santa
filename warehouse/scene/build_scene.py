@@ -33,7 +33,27 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 from roof_structure import add_h_col, build_roof   # 박공지붕·H형강 (pxr 이후 import)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MAP_DIR = os.path.join(HERE, "..", "t3_warehouse_map", "map")
+
+
+def _map_dir():
+    """맵 폴더. **배치가 두 가지다** — 안 맞으면 `occupancy_grid.npy` 를 못 찾고
+    즉시 죽는다 (2026-09-09).
+
+        $MAP                              paths.sh 가 잡아준 값 (서버)
+        <저장소>/warehouse/map            Santa 배치
+        <저장소>/../t3_warehouse_map/map  팀 저장소(2_Simulation) 배치
+    """
+    for d in (os.environ.get("MAP", ""),
+              os.path.join(HERE, "..", "map"),
+              os.path.join(HERE, "..", "t3_warehouse_map", "map")):
+        if d and os.path.isfile(os.path.join(d, "occupancy_grid.npy")):
+            return os.path.abspath(d)
+    raise SystemExit(
+        "★ occupancy_grid.npy 를 찾을 수 없습니다. $MAP 을 지정하거나\n"
+        "  warehouse/map/ 에 맵 세트를 두세요.")
+
+
+MAP_DIR = _map_dir()
 OUT_DIR = os.path.join(HERE, "out")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -56,7 +76,11 @@ CONV_SEC_L = 2.719
 CONVEYORS_VIS = [(14.6, 38.9, 16.0, False), (14.6, 70.9, 16.0, False),
                  (94.6, 43.1, 15.0, False), (94.6, 75.1, 15.0, False),
                  (101.0, 34.4, 7.4, False),                 # 패킹→출고 연결 (동진)
-                 (107.5, 35.3, 7.8, True)]                  # 패킹→출고 연결 (북상)
+                 (107.5, 35.3, 7.8, True),                  # 패킹→출고 연결 (북상)
+                 # ★ v6.0 격자에 새로 생긴 수직 구간 (성분 x106.4~107.3 y39.9~43.1,
+                 #   폭 0.9 = 컨베이어 폭). 표에 없어서 이 셀이 작업대로 분류되고
+                 #   packing_table 이 4개 얹혔다 (2026-09-08 실측).
+                 (106.4, 39.9, 3.2, True)]                  # y43.1 벨트로 합류
 UNIT_L = 3.0                    # 렉 유닛 길이 (y) — v6.0 구역제(반쪽 3랙×3m).
 DECK_SCALE = UNIT_L / 4.0       # SM_RackShelf 베이는 4.0m — 장축 0.75 스케일로 정합
 RACK_D = 1.08                   # 데크 실측 깊이 (그리드 선언 1.2 — 풋프린트 내 배치)
@@ -480,8 +504,32 @@ UsdGeom.Xform.Define(stage, "/World/conveyors")
 UsdGeom.Xform.Define(stage, "/World/worktables")
 n_conv = n_tab = 0
 bench_mask = np.zeros_like(grid, dtype=bool)
+
+# [patch_worktable] 성분 기준 분류
+#   좌표표(`on_conveyor`)는 격자가 바뀌면 조용히 낡는다 — 실제로 v6.0 에서 표에 없는
+#   수직 컨베이어가 생겨 packing_table 이 4개 잘못 얹혔다 (2026-09-08).
+#   대신 **연결 성분의 긴 변**으로 가른다. 컨베이어는 7~16 m, 작업대는 2.3~3.2 m 라
+#   경계가 넓다 (실측 긴변 분포: 2.3·2.4·3.0·3.2 / 4.7·7.4·15.0·16.0 — 사이가 비어 있다).
+#   모따기(45° 앞면)로 rect 가 209개로 쪼개져도 성분은 38개로 온전하다.
+from scipy import ndimage                             # noqa: E402
+_nd = ndimage                    # 아래 `ndimage.label(bench_mask)` 도 이 이름을 쓴다
+
+_lab5, _n5 = _nd.label(grid == 5)
+_CONV_LONG = 3.5            # m — 긴 변이 이 이상이면 컨베이어
+_MIN_BENCH = 100            # 셀 — 1 m² 미만은 파편 (실측 9·19·6·1·6·1칸)
+_conv_ids, _frag_ids = set(), set()
+for _k, (_sr, _sc) in enumerate(_nd.find_objects(_lab5), 1):
+    _W, _H = (_sc.stop - _sc.start) * CELL, (_sr.stop - _sr.start) * CELL
+    if max(_W, _H) >= _CONV_LONG:
+        _conv_ids.add(_k)
+    elif int((_lab5[_sr, _sc] == _k).sum()) < _MIN_BENCH:
+        _frag_ids.add(_k)
+print(f"[2*] 셀값5 성분 {_n5}개 → 컨베이어 {len(_conv_ids)} · "
+      f"작업대 {_n5 - len(_conv_ids) - len(_frag_ids)} · 파편 {len(_frag_ids)}(비주얼 제외)")
+
 for i, (r0, c0, h, w) in enumerate(convs):
-    if on_conveyor((c0 + w / 2) * CELL, (r0 + h / 2) * CELL):   # 컨베이어 — 콜라이더 전용(비주얼은 A08)
+    _cid = int(_lab5[r0 + h // 2, c0 + w // 2])
+    if _cid in _conv_ids:                                 # 컨베이어 — 콜라이더 전용(비주얼은 A08)
         b = add_box(stage, f"/World/conveyors/c_{i}", c0 * CELL, r0 * CELL,
                     w * CELL, h * CELL, 0.0, CONV_H)
         UsdGeom.Imageable(b.GetPrim()).MakeInvisible()
@@ -490,7 +538,10 @@ for i, (r0, c0, h, w) in enumerate(convs):
         b = add_box(stage, f"/World/worktables/t_{i}", c0 * CELL, r0 * CELL,
                     w * CELL, h * CELL, 0.0, TABLE_H)     # (투명), 비주얼은 packing_table
         UsdGeom.Imageable(b.GetPrim()).MakeInvisible()
-        bench_mask[r0:r0 + h, c0:c0 + w] = True
+        # ★ 파편(1 m² 미만)은 콜라이더만 남기고 비주얼 대상에서 뺀다 — 작은 조각에
+        #   packing_table 을 세우면 실제 없는 작업대가 생긴다.
+        if _cid not in _frag_ids:
+            bench_mask[r0:r0 + h, c0:c0 + w] = True
         n_tab += 1
 # 정적 비주얼 — 기능 없는 모양용 (V&V·플래너는 위 콜라이더 박스 기준 그대로)
 n_sec = 0
@@ -508,8 +559,6 @@ for ci, (cx0, cy0, clen, vert) in enumerate(CONVEYORS_VIS):
         n_sec += 1
 # 작업대 비주얼 — packing_table (컴포즈 실측 2.47x0.78 h1.08, 벤치 rect 2.3~3.2x1.3).
 # 그리디 분할로 벤치 하나가 2rect가 될 수 있어 연결 성분 중심으로 배치(성분 14 실측)
-from scipy import ndimage
-
 PACK_USD = ASSETS + "/Isaac/Props/PackingTable/packing_table.usd"
 blab, n_bench = ndimage.label(bench_mask)
 for k in range(1, n_bench + 1):
