@@ -178,11 +178,6 @@ SHOT_STRIDE = max(1, int(os.environ.get("PIBT_SHOT_STRIDE", "20")))
 SHOT_EXT = os.environ.get("PIBT_SHOT_EXT", "png")      # png | jpg
 SHOT_FPS = int(os.environ.get("PIBT_SHOT_FPS", "30"))  # 조립 fps (배속 계산용)
 
-# --- 렌더 빈도 (patch_render_rate.py) ---------------------------------
-#   물리 dt 는 그대로 두고 렌더만 1/RENDER_EVERY 로 줄인다.
-#   1 이면 아무것도 건드리지 않는다 (기존 동작과 완전히 같다).
-RENDER_EVERY = max(1, int(os.environ.get("PIBT_RENDER_EVERY", "1")))
-
 state = {"sub": None, "fleet": None, "n": 0, "t": 0.0, "done": False,
          "vp": None, "shots": 0, "shot_fail": 0}
 
@@ -450,52 +445,6 @@ def _quit(code=0):
         carb.log_error(f"[pibt] 종료 요청 실패: {e!r} "
                        "— 수동으로 끊어야 한다 (pkill -u $USER -f isaacsim)")
 
-
-def _setup_render_rate():
-    """렌더 빈도를 낮춘다. 물리 dt 는 건드리지 않는다.
-
-    `tl.play()` **앞에서** 불러야 한다. 쓴 값을 되읽어 찍으므로, 키 이름이
-    맞지 않으면 로그에서 바로 보인다.
-    """
-    if RENDER_EVERY <= 1:
-        return
-    rate = 60.0 / RENDER_EVERY
-    try:
-        import carb.settings
-        s = carb.settings.get_settings()
-    except Exception as e:
-        carb.log_error(f"[pibt] 렌더 빈도: carb.settings 실패 {e!r}")
-        return
-
-    # 버전에 따라 키가 다를 수 있어 후보를 모두 쓴다. 되읽어 확인한다.
-    wrote = []
-    for key, val in (
-        ("/app/player/useFixedTimeStepping", True),
-        ("/app/player/timeStepsPerSecond", float(rate)),
-        ("/persistent/simulation/minFrameRate", float(rate)),
-        ("/app/runLoops/main/rateLimitEnabled", False),
-    ):
-        try:
-            if isinstance(val, bool):
-                s.set_bool(key, val)
-            else:
-                s.set_float(key, val)
-            wrote.append((key, val, s.get(key)))
-        except Exception as e:
-            wrote.append((key, val, f"실패 {e!r}"))
-
-    carb.log_warn(f"[pibt] 렌더 빈도 1/{RENDER_EVERY} 요청 "
-                  f"(앱 {rate:g} fps · 물리 60 Hz 유지)")
-    for k, v, back in wrote:
-        carb.log_warn(f"[pibt]   {k} = {v}  ->  되읽음 {back}")
-    carb.log_warn("[pibt]   ★ 주기 로그의 steps/frame 이 "
-                  f"{RENDER_EVERY} 근처여야 적용된 것이다. "
-                  "1 이면 무시된 것이니 되돌릴 것")
-    if SHOTS and SHOT_STRIDE != RENDER_EVERY:
-        carb.log_warn(f"[pibt]   ★ SHOT_STRIDE({SHOT_STRIDE}) != "
-                      f"RENDER_EVERY({RENDER_EVERY}) — 같은 프레임을 여러 번 "
-                      "찍거나 갱신 없는 프레임을 찍을 수 있다. 맞추는 것이 좋다")
-
 def _on_physics(dt):
     """물리 스텝 콜백.
 
@@ -567,26 +516,7 @@ def _tick(f, dt):
         return
 
     if state["n"] % 600 == 0:
-        # 렌더가 실제로 줄었는지 여기서 보인다 (patch_render_rate.py)
-        #   첫 줄은 기준점을 잡는 줄이라 값이 없다 (- 로 찍힌다).
-        #   두 번째 줄부터 (스텝 증분)/(프레임 증분) 이다.
-        _fr = 0
-        try:
-            import omni.kit.app as _ka
-            _fr = int(_ka.get_app().get_update_number())
-        except Exception:
-            pass
-        _spf = None
-        if _fr:
-            if state.get("f0") is None:
-                state["f0"], state["n0"] = _fr, state["n"]
-            else:
-                _df = _fr - int(state["f0"])
-                if _df > 0:
-                    _spf = (state["n"] - int(state["n0"])) / _df
         carb.log_warn(f"[pibt] t={state['t']:.0f}s  {f.stats}"
-                      + (f"  steps/frame {_spf:.1f}" if _spf is not None
-                         else ("  steps/frame -" if _fr else ""))
                       + (f"  타임아웃 {len(f.timeouts)}" if f.timeouts else "")
                       + (f"  캡처 {state['shots']}장" if SHOTS else ""))
         for m in f.timeouts[-2:]:
@@ -745,7 +675,6 @@ async def _run():
     from isaacsim.core.utils.types import ArticulationAction
     import numpy as np
 
-    _setup_render_rate()      # ★ play 앞에서. 물리 dt 는 안 바뀐다
     tl = omni.timeline.get_timeline_interface()
     tl.set_current_time(0.0)
     tl.play()
