@@ -16,6 +16,8 @@
 #   SHOT_STRIDE=20   몇 물리스텝마다 한 장 (기본 20)
 #   WATCH_SEC=420    촬영 확인까지 대기 (기본 420초)
 #   ISOLATE=0        GPU 격리 해제 (기본은 CUDA_VISIBLE_DEVICES=$GPU)
+#   FINISH_GRACE=90  완주(post_quit) 표시 뒤 정상 종료를 기다리는 초 (기본 90)
+#   IDLE_KILL=300    프레임이 이만큼 안 늘면 끝난 것으로 보고 끊는다 (기본 300)
 #   SHOT_FPS=30      출력 fps (기본 30)
 #   SHOT_EXT=png     png | jpg
 #   RUN_TAG=이름     출력 폴더·파일 이름 (기본 시각)
@@ -206,6 +208,80 @@ trap assemble EXIT
   fi ) &
 WATCH=$!
 
+# ── 완주 후 안 죽는 것을 끊는다 ─────────────────────────────
+#   실측 2026-09-08 04:50 — `post_quit` 이 나간 뒤 32 ms 만에
+#     [carb.windowing-glfw.plugin] GLFW initialization failed.
+#     [carb] Failed to startup plugin carb.windowing-glfw.plugin
+#   이 찍히고 프로세스가 안 끝난다. `--no-window` 인데 종료 경로에서 윈도잉
+#   플러그인을 다시 올리려다 실패하고 멈춘다. 그래서 사람이 Ctrl-C 를 쳐야 했다.
+#
+#   신호를 무엇으로 잡나 — 세 개를 함께 본다:
+#     1. Carb 자체 로그 (무버퍼! typescript 와 달리 즉시 flush 된다)
+#     2. typescript (버퍼링돼 늦게 보이지만, 있으면 확실하다)
+#     3. 프레임 정체 — 위 둘을 못 봐도 캡처가 멈추면 주행은 끝난 것이다
+#
+#   ★ typescript 만 믿으면 안 된다 — 즉시 flush 되지 않는다 (이 파일 위쪽 실측).
+KITLOG_DIR="$HOME/.nvidia-omniverse/logs/Kit"
+FINISH_GRACE="${FINISH_GRACE:-90}"    # 완주 표시 뒤 이만큼은 정상 종료를 기다린다
+IDLE_KILL="${IDLE_KILL:-300}"         # 프레임이 이만큼 안 늘면 끝난 것으로 본다
+POLL=15
+
+_kit_alive() {
+    for p in $(pgrep -u "$ME" -f "$KITPAT" 2>/dev/null); do
+        [ "$p" = "$$" ] && continue
+        case "$(cat /proc/$p/comm 2>/dev/null)" in
+            python*|isaacsim*|kit*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+( marker_at=0; idle=0; prev=-1
+  while sleep "$POLL"; do
+      _kit_alive || exit 0                       # 스스로 잘 끝났다
+
+      n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
+      if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
+          idle=$((idle + POLL))
+      else
+          idle=0
+      fi
+      prev="$n"
+
+      seen=0
+      grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null && seen=1
+      if [ "$seen" = 0 ] && [ -d "$KITLOG_DIR" ]; then
+          # 무버퍼 로그. 최근 것만 본다 (런당 124 MB 라 전수는 비싸다).
+          for L in $(ls -t "$KITLOG_DIR"/*/*/kit_*.log 2>/dev/null | head -3); do
+              grep -aq "post_quit" "$L" 2>/dev/null && { seen=1; break; }
+          done
+      fi
+      [ "$seen" = 1 ] && [ "$marker_at" = 0 ] && marker_at=$(date +%s)
+
+      why=""
+      if [ "$marker_at" != 0 ] \
+         && [ $(( $(date +%s) - marker_at )) -ge "$FINISH_GRACE" ]; then
+          why="완주 표시 뒤 ${FINISH_GRACE}초가 지났는데 프로세스가 남아 있습니다"
+      elif [ "$idle" -ge "$IDLE_KILL" ]; then
+          why="프레임이 ${IDLE_KILL}초 동안 ${n}장에서 안 늘었습니다"
+      fi
+      [ -z "$why" ] && continue
+
+      echo
+      echo "──────────── 자동 종료 ────────────"
+      echo "$why."
+      echo "Kit 종료 지연으로 보고 끊습니다 (GLFW 종료 경로 결함, 2026-09-08 실측)."
+      echo "프레임은 남아 있으니 영상은 그대로 만들어집니다."
+      pkill -u "$ME" -INT -f "$KITPAT" 2>/dev/null
+      for _ in $(seq 20); do sleep 1; _kit_alive || break; done
+      if _kit_alive; then
+          echo "SIGINT 로 안 죽어 SIGKILL 을 보냅니다."
+          pkill -u "$ME" -KILL -f "$KITPAT" 2>/dev/null
+      fi
+      exit 0
+  done ) &
+FINWATCH=$!
+
 # ── 주행 ────────────────────────────────────────────────────
 # ★ `SHOTS=0` 은 **자식에만** 준다 (이 스크립트의 $SHOTS 는 mkdir·감시·조립이 쓴다).
 #   `run.sh` 는 `SHOTS`/`SHOT_*` 를 export 하는데 `live_pibt.py` 는 `PIBT_*` 를 읽는다
@@ -215,7 +291,7 @@ WATCH=$!
 #   촬영은 위에서 export 한 `PIBT_*` 가 담당한다.
 script -q -e -c "SHOTS=0 bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG"
 rc=$?
-kill "$WATCH" 2>/dev/null
+kill "$WATCH" "$FINWATCH" 2>/dev/null
 echo
 echo "Isaac 종료 (코드 $rc)"
 exit "$rc"
