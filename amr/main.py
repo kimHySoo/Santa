@@ -158,7 +158,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
-        p.add_argument("--planner", default="wppl", help="amr/path/ 의 계획기 이름")
+        p.add_argument("--planner", default="pibt_h", help="amr/path/ 의 계획기 이름")
         p.add_argument("--n", type=int, default=12, help="로봇 대수")
         p.add_argument("--map", default=None, help="맵 폴더 (기본: upstream v5.9)")
 
