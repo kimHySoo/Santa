@@ -14,7 +14,8 @@
 #
 # ── 조절 ────────────────────────────────────────────────────
 #   SHOT_STRIDE=20   몇 물리스텝마다 한 장 (기본 20)
-#   WATCH_SEC=150    촬영 확인까지 대기 (기본 150초)
+#   WATCH_SEC=420    촬영 확인까지 대기 (기본 420초)
+#   ISOLATE=0        GPU 격리 해제 (기본은 CUDA_VISIBLE_DEVICES=$GPU)
 #   SHOT_FPS=30      출력 fps (기본 30)
 #   SHOT_EXT=png     png | jpg
 #   RUN_TAG=이름     출력 폴더·파일 이름 (기본 시각)
@@ -50,8 +51,21 @@ SHOT_STRIDE="${SHOT_STRIDE:-20}"
 SHOT_FPS="${SHOT_FPS:-30}"
 SHOT_EXT="${SHOT_EXT:-png}"
 STRICT="${STRICT:-1}"
-WATCH_SEC="${WATCH_SEC:-150}"
+WATCH_SEC="${WATCH_SEC:-420}"
 VIDEO="${VIDEO:-1}"
+ISOLATE="${ISOLATE:-1}"
+
+# ── GPU 격리 ────────────────────────────────────────────────
+#   `--/renderer/activeGpu=$GPU` 는 **렌더러(Vulkan)만** 묶는다.
+#   PhysX / warp / torch 쪽 CUDA 는 보이는 장치마다 primary context 를
+#   하나씩 만든다 — 실측 2026-09-08 13:03: GPU0 518MiB, GPU1 436MiB,
+#   GPU2 436MiB, GPU3 6449MiB. 1,2 는 일 안 하고 VRAM 만 잡고 있었다.
+#   CUDA_VISIBLE_DEVICES 가 이걸 막는 유일한 수단이다.
+#   Vulkan 열거는 CUDA_VISIBLE_DEVICES 를 따르지 않으므로 activeGpu 는
+#   그대로 $GPU 를 쓴다. 렌더러가 엉뚱한 장치로 가면 ISOLATE=0 으로 끈다.
+if [ "$ISOLATE" = "1" ]; then
+    export CUDA_VISIBLE_DEVICES="$GPU"
+fi
 
 SHOTS="$OUT/shots_$TAG"
 MP4="$OUT/demo_$TAG.mp4"
@@ -171,8 +185,9 @@ trap assemble EXIT
 #   ★ 로그를 읽지 않고 **프레임 폴더를 센다.** `script` 의 typescript 는
 #     즉시 flush 되지 않아서 로그 기반 확인은 조용히 통과해버린다 (실측).
 #     프레임은 실제 산출물이므로 거짓 통과가 없다.
-#   촬영은 verify_start 통과 후(약 90초) 시작하고, STRIDE 20 이면 sim 0.33초에
-#   첫 장이 나온다. 그래서 150초면 있어야 한다.
+#   ★ 150초는 너무 짧았다 (2026-09-08 13:04, 정상 런을 끊었다). Kit 부팅 +
+#     USD 로드 + play 전 프레임 대기까지 합쳐 첫 장까지 5분 넘게 걸린다.
+#     420초로 늘렸다. 그래도 첫 장이 없으면 촬영이 정말 꺼진 것이다.
 ( sleep "$WATCH_SEC"
   n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
   if [ "$n" -gt 0 ]; then exit 0; fi                       # 촬영 중
