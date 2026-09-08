@@ -16,8 +16,10 @@
 #   SHOT_STRIDE=20   몇 물리스텝마다 한 장 (기본 20)
 #   WATCH_SEC=420    촬영 확인까지 대기 (기본 420초)
 #   ISOLATE=0        GPU 격리 해제 (기본은 CUDA_VISIBLE_DEVICES=$GPU)
-#   FINISH_GRACE=5   완주(post_quit) 표시 뒤 끊기까지 초 (기본 5, 0 = 즉시)
+#   FINISH_GRACE=5   `post_quit` 표시 뒤 끊기까지 초 (기본 5, 0 = 즉시)
+#   DONE_GRACE=30    `전원 완주` 만 보이고 post_quit 이 없을 때 (기본 30)
 #   IDLE_KILL=300    프레임이 이만큼 안 늘면 끝난 것으로 보고 끊는다 (기본 300)
+#   BOOT_WAIT=600    Kit 이 뜨기를 기다리는 한도 (기본 600). 이 안에 안 뜨면 감시를 접는다
 #   SHOT_FPS=30      출력 fps (기본 30)
 #   SHOT_EXT=png     png | jpg
 #   RUN_TAG=이름     출력 폴더·파일 이름 (기본 시각)
@@ -222,9 +224,17 @@ WATCH=$!
 #
 #   ★ typescript 만 믿으면 안 된다 — 즉시 flush 되지 않는다 (이 파일 위쪽 실측).
 KITLOG_DIR="$HOME/.nvidia-omniverse/logs/Kit"
-FINISH_GRACE="${FINISH_GRACE:-5}"     # 완주 표시 뒤 이만큼만 기다린다 (마지막 PNG 비동기 쓰기 몫).
+FINISH_GRACE="${FINISH_GRACE:-5}"     # `post_quit` 뒤 이만큼만 기다린다 (마지막 PNG 비동기 쓰기 몫).
                                       # 90초였는데 정상 종료가 성공한 적이 한 번도 없어 줄였다 (2026-09-08).
                                       # 0 으로 주면 즉시 끊는다.
+DONE_GRACE="${DONE_GRACE:-30}"        # `전원 완주` 만 보였을 때. **post_quit 과 같이 두면 안 된다** —
+                                      # 완주는 로봇이 다 도착한 시점이고, 그 뒤에 마지막 캡처와 KPI
+                                      # 쓰기가 남는다. 5초로 끊으면 그것들을 날린다 (2026-09-08).
+BOOT_WAIT="${BOOT_WAIT:-600}"         # Kit 이 뜨기를 기다리는 한도.
+                                      # ★ 이게 없으면 감시가 2초에 죽는다 — `_kit_alive` 는 execvpe
+                                      #   이후에야 참이 되는데, POLL 을 15 -> 2 로 줄이면서 첫 확인이
+                                      #   Isaac 기동보다 앞서게 됐다 (2026-09-08). 자동 종료가 통째로
+                                      #   안 도는 원인이었다.
 IDLE_KILL="${IDLE_KILL:-300}"         # 프레임이 이만큼 안 늘면 끝난 것으로 본다
 POLL=2                                 # 표시 확인 주기. script -f 라 typescript 가 즉시 반영된다
 SLOW_EVERY=7                           # 무거운 확인(Carb 로그 grep · 프레임 세기)은 7회마다 = 약 14초
@@ -239,14 +249,32 @@ _kit_alive() {
     return 1
 }
 
-( marker_at=0; idle=0; prev=-1; slow=0; n=0
+( quit_at=0; done_at=0; idle=0; prev=-1; slow=0; n=0
+  seen_kit=0                                     # Kit 이 **한 번이라도** 잡혔나
+  boot_deadline=$(( $(date +%s) + BOOT_WAIT ))
   while sleep "$POLL"; do
-      _kit_alive || exit 0                       # 스스로 잘 끝났다
+      # ── Kit 이 있나 — "아직 안 떴다" 와 "끝났다" 는 다르다 ──
+      if _kit_alive; then
+          seen_kit=1
+      elif [ "$seen_kit" = 1 ]; then
+          exit 0                                 # 떴다가 사라졌다 = 스스로 잘 끝났다
+      elif [ "$(date +%s)" -ge "$boot_deadline" ]; then
+          exit 0                                 # 한도 안에 안 떴다 = 기동 실패. 감시할 것이 없다
+      else
+          continue                               # 아직 부팅 중 (씬 빌드 + Kit 부팅 + USD 로드)
+      fi
 
-      # ── 매 회(2초): 완주 표시 — 이것만 빠르면 된다 ──────────
-      seen=0
-      if [ "$marker_at" = 0 ]; then
-          grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null && seen=1
+      # ── 매 회(2초): 완주 표시 ────────────────────────────────
+      #   평상시 비용은 grep 한 번이다. 하나라도 걸렸을 때만 둘로 나눠 본다.
+      if [ "$quit_at" = 0 ] || [ "$done_at" = 0 ]; then
+          if grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null; then
+              if [ "$quit_at" = 0 ] && grep -aq "post_quit" "$MYLOG" 2>/dev/null; then
+                  quit_at=$(date +%s)
+              fi
+              if [ "$done_at" = 0 ] && grep -aq "전원 완주" "$MYLOG" 2>/dev/null; then
+                  done_at=$(date +%s)
+              fi
+          fi
       fi
 
       # ── 7회마다(약 14초): 무거운 확인 ───────────────────────
@@ -261,22 +289,24 @@ _kit_alive() {
           fi
           prev="$n"
       fi
-      if [ "$seen" = 0 ] && [ "$marker_at" = 0 ] && [ "$slow" = 0 ] && [ -d "$KITLOG_DIR" ]; then
+      if [ "$quit_at" = 0 ] && [ "$slow" = 0 ] && [ -d "$KITLOG_DIR" ]; then
           # 무버퍼 로그. 최근 10분 안에 쓰인 파일만 본다 (런당 124 MB, 전수는 비싸다).
           # ★ `for L in $(ls ...)` 는 폴더 이름에 공백이 있으면 경로가 깨져 grep 이
           #   조용히 실패한다 — 2026-09-08 15:13 런에서 표시 경로가 안 잡힌 원인 후보.
           #   find -exec 는 단어 분리를 하지 않는다.
           if [ -n "$(find "$KITLOG_DIR" -name 'kit_*.log' -mmin -10 \
                      -exec grep -la "post_quit" {} + 2>/dev/null | head -1)" ]; then
-              seen=1
+              quit_at=$(date +%s)
           fi
       fi
-      [ "$seen" = 1 ] && [ "$marker_at" = 0 ] && marker_at=$(date +%s)
 
       why=""
-      if [ "$marker_at" != 0 ] \
-         && [ $(( $(date +%s) - marker_at )) -ge "$FINISH_GRACE" ]; then
-          why="완주 표시 뒤 ${FINISH_GRACE}초가 지났는데 프로세스가 남아 있습니다"
+      if [ "$quit_at" != 0 ] \
+         && [ $(( $(date +%s) - quit_at )) -ge "$FINISH_GRACE" ]; then
+          why="post_quit 뒤 ${FINISH_GRACE}초가 지났는데 프로세스가 남아 있습니다"
+      elif [ "$done_at" != 0 ] \
+           && [ $(( $(date +%s) - done_at )) -ge "$DONE_GRACE" ]; then
+          why="전원 완주 뒤 ${DONE_GRACE}초가 지났는데 post_quit 도 종료도 없습니다"
       elif [ "$idle" -ge "$IDLE_KILL" ]; then
           why="프레임이 ${IDLE_KILL}초 동안 ${n}장에서 안 늘었습니다"
       fi
