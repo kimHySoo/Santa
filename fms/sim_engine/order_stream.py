@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # 주문 스트림 — 주문·입고 도착 + 태스크 분해 (02 시뮬 WMS 역할, 커널 밖)
-# (설계: docs/2026-09-04_커널_라이브러리화_SimPy하네스_설계.md §5, 흐름 규칙: docs/2026-08-31_sim_v2_틱루프_설계.md §6)
+# (설계·흐름 규칙: docs/커널_시뮬_구조.md#태스크-흐름)
 #
 # 커널(fms_kernel.FmsKernel)은 태스크(from→to)만 받는다. 주문이 몇 개 라인인지, 어느 통로에서
 # 나오는지, v1compat 체인의 다음 태스크가 무엇인지는 전부 여기서 결정한다. rng 는 이 객체만 갖는다.
@@ -49,34 +49,43 @@ class OrderStream:
         self.horizon = horizon
         gap_in = order_gap if inbound_gap is None else inbound_gap
         if horizon is None:
-            self.windows = None
-            self.n_orders = n_orders
-            if flow != "main":
-                self.n_inbound = 0                       # v1compat: 입고 없음
-            elif n_inbound is None:
-                self.n_inbound = n_orders                # main 기본: 입고 = 주문 수
-            else:
-                self.n_inbound = n_inbound
-            # 도착 시각표 (지수분포 간격, 틱). 주문 → 입고 순으로 뽑는다 (rng 순서 고정).
-            self.order_times = np.cumsum(rng.exponential(order_gap, n_orders)).astype(int) + 1
-            if flow == "main":
-                self.inbound_times = np.cumsum(rng.exponential(gap_in, self.n_inbound)).astype(int) + 1
-            else:
-                self.inbound_times = np.array([], dtype=int)
+            self._init_finite(flow, n_orders, n_inbound, order_gap, gap_in)
         else:
-            assert flow == "main", "고정 시간 모드는 main 흐름만 (v1compat 은 패리티 전용)"
-            self.windows = shift_windows(horizon, tuple(shifts))
-            self.order_times = np.concatenate([self._window_times(s, e, order_gap)
-                                               for kind, s, e in self.windows if kind == "out"] or [np.array([], dtype=int)])
-            self.inbound_times = np.concatenate([self._window_times(s, e, gap_in)
-                                                 for kind, s, e in self.windows if kind == "in"] or [np.array([], dtype=int)])
-            self.n_orders, self.n_inbound = len(self.order_times), len(self.inbound_times)
+            self._init_horizon(flow, horizon, shifts, order_gap, gap_in)
         self.task_seq = 0
         self.orders = {}             # oid -> dict(created, remaining, completed)
         self.chains = {}             # v1compat: oid -> 남은 체인 정의
         self.outstanding_orders = self.n_orders
         self.outstanding_inbound = self.n_inbound
         self._oi = self._ii = 0
+
+    def _init_finite(self, flow, n_orders, n_inbound, order_gap, gap_in):
+        """유한 주문 모드: 주문 n_orders + 입고(main: 기본 = 주문 수) 도착 시각표. 주문 → 입고 순으로 뽑는다 (rng 순서 고정)."""
+        rng = self.rng
+        self.windows = None
+        self.n_orders = n_orders
+        if flow != "main":
+            self.n_inbound = 0                       # v1compat: 입고 없음
+        elif n_inbound is None:
+            self.n_inbound = n_orders                # main 기본: 입고 = 주문 수
+        else:
+            self.n_inbound = n_inbound
+        # 도착 시각표 (지수분포 간격, 틱).
+        self.order_times = np.cumsum(rng.exponential(order_gap, n_orders)).astype(int) + 1
+        if flow == "main":
+            self.inbound_times = np.cumsum(rng.exponential(gap_in, self.n_inbound)).astype(int) + 1
+        else:
+            self.inbound_times = np.array([], dtype=int)
+
+    def _init_horizon(self, flow, horizon, shifts, order_gap, gap_in):
+        """고정 시간·교대 모드: 창마다 그 종류(out/in)의 도착만. 주문 창 → 입고 창 순으로 뽑는다."""
+        assert flow == "main", "고정 시간 모드는 main 흐름만 (v1compat 은 패리티 전용)"
+        self.windows = shift_windows(horizon, tuple(shifts))
+        self.order_times = np.concatenate([self._window_times(s, e, order_gap)
+                                           for kind, s, e in self.windows if kind == "out"] or [np.array([], dtype=int)])
+        self.inbound_times = np.concatenate([self._window_times(s, e, gap_in)
+                                             for kind, s, e in self.windows if kind == "in"] or [np.array([], dtype=int)])
+        self.n_orders, self.n_inbound = len(self.order_times), len(self.inbound_times)
 
     def _window_times(self, start, end, gap):
         """창 [start, end) 안의 도착 틱: 창 시작부터 지수 간격 누적, 유한 모드와 같은 규칙(floor + 1)으로 틱화, 창 끝에서 절단.

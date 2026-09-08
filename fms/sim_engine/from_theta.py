@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # B-2: from_theta() — θ 11개를 칸별 통행 비용(Guidance)으로 변환 (스키마 v2)
-# (설계: docs/2026-09-01_B2_from_theta_설계.md §3 v2 개정,
-#  합의: docs/2026-09-01_θ스키마_합의안.md, 계약: contracts/guidance_types.py)
+# (설계: docs/θ_경로_기준선.md#from_theta-조립-규칙,
+#  합의: docs/θ_경로_기준선.md#θ-11개-스키마, 계약: contracts/guidance_types.py)
 #
 # 조립 규칙 (합의안 "비용 조립 규칙"):
 #   1. 모든 간선 1.0
@@ -13,7 +13,7 @@
 #
 # 토폴로지는 wallA 전용 규칙 기반 추출 (A트랙 topology_tensor 15ch는 별도).
 # 거리항은 sim_v2가 --theta일 때 이 edge_cost로 가중 다익스트라를 돌린다
-# (pibt_core.dist_map / dist_map_h, docs/2026-09-02 결정 §5).
+# (pibt_core.dist_map / dist_map_h, docs/이동계층_PIBT.md#가중-다익스트라-거리장).
 # ============================================================
 import json
 import os

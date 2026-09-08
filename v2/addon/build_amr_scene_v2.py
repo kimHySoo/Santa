@@ -22,8 +22,9 @@ import argparse, json, math, os
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--warehouse",
-                default=os.path.expanduser("~/khs/wh/v2/upstream/2_Simulation/t3_warehouse/warehouse_scene.usd"))
-ap.add_argument("--robot", default=os.path.expanduser("~/khs/wh/robots/iwhub/iw_hub.usd"))
+                default=os.path.expanduser("~/khs/wh/warehouse/scene/warehouse_scene.usd"))
+ap.add_argument("--robot",
+                default=os.path.expanduser("~/khs/wh/warehouse/robots/iwhub/iw_hub.usd"))
 ap.add_argument("--traj", default=os.path.expanduser("~/khs/wh/v2/traj_v59/fleet_02/trajectories.json"))
 ap.add_argument("--n", type=int, default=2)
 ap.add_argument("--starts", default=None,

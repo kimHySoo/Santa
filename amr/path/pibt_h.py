@@ -70,7 +70,9 @@ def scene_cmd(n=12):
 
 
 def launch(n=12):
-    # 자세를 대입하는 방식이라 렌더러에 순간이동으로 보인다 — 모션블러가 번진다.
+    # 모션블러를 끈다. (예전 주석이 "자세를 대입하는 방식이라 순간이동으로 보인다"
+    #  고 적었는데 틀렸다 — live_pibt 는 joint_velocities 로 실제 PhysX 주행이다.
+    #  자세 대입은 replay_wppl / render_video_wppl 쪽 얘기다. 2026-09-08 정정)
     return Launch(
         "live_pibt.py",
         env=[("PIBT_SEED", str(SEED)), ("PIBT_PITCH", str(PITCH)),

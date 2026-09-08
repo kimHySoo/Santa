@@ -34,3 +34,7 @@ venv/
 
 # --- Jupyter ---
 .ipynb_checkpoints/
+
+# --- 패치 스크립트 백업 ---
+*.bak
+*.bak.*

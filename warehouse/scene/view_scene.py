@@ -9,6 +9,7 @@ UDP 차단망(캠퍼스 내부망 — tailscale DERP 릴레이 실측): WebRTC �
 """
 
 import os
+import sys
 
 from isaacsim import SimulationApp
 
@@ -44,6 +45,9 @@ xf.AddTranslateOp().Set(Gf.Vec3d(20, 20, 22))
 xf.AddRotateXYZOp().Set(Gf.Vec3f(62, 0, -38))
 get_active_viewport().camera_path = "/World/view_cam"
 
+# http_stream.py 는 v2/addon/ 에만 있다 — 이 파일과 폴더가 다르다 (2026-09-08).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))), "v2", "addon"))
 from http_stream import HttpViewer
 
 viewer = HttpViewer(port=8211)

@@ -2,7 +2,8 @@
 import urllib.request, urllib.parse, xml.etree.ElementTree as ET, os, concurrent.futures
 B = "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
 PREFIX = "Assets/Isaac/6.0/Isaac/Robots/Idealworks/iwhub/"
-DEST = os.path.expanduser("~/khs/wh/robots/iwhub/")
+# paths.sh 의 $WAREHOUSE/robots/iwhub 와 같은 자리여야 한다 (2026-09-08 정정).
+DEST = os.path.expanduser("~/khs/wh/warehouse/robots/iwhub/")
 NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 
 def keys():

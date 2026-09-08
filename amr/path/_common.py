@@ -72,7 +72,9 @@ import os as _os
 #   bash run.sh --planner pibt_h             시연용
 #
 # ★ 모듈 임포트 시점에 읽는다 -> python 이 뜨기 전에 정해져야 한다.
-#   `run.sh` 가 `exec python` 하므로 위 형태로 전달된다. CLI 인자로는 못 만든다
+#   `run.sh` 가 환경을 물려주므로 위 형태로 전달된다. CLI 인자로는 못 만든다
+#   (run.sh 는 영상 조립 trap 때문에 **exec 를 쓰지 않는다** — 2026-09-08 정정.
+#    결론은 같지만 근거가 틀려 있었다)
 #   (LAUNCH 가 main.py 의 argparse 보다 먼저 평가된다).
 _STREAM = _os.environ.get("STREAM", "1") not in ("0", "", "false", "False")
 

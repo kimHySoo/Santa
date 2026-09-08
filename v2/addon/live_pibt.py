@@ -163,6 +163,8 @@ N = int(os.environ.get("PIBT_N", "12"))
 PITCH = float(os.environ.get("PIBT_PITCH", "1.2"))
 SEED = int(os.environ.get("PIBT_SEED", "9"))
 MAX_STEPS = int(os.environ.get("PIBT_MAX_STEPS", "400"))
+# 기본값 "oneshot" 은 사실상 죽은 값이다 — amr/path/pibt_h.py 가 항상
+# PIBT_MODE=lifelong 을 넣는다. one-shot 은 시드를 타므로 직접 켜지 말 것.
 MODE = os.environ.get("PIBT_MODE", "oneshot")          # oneshot | lifelong
 HORIZON = int(os.environ.get("PIBT_HORIZON", "315"))   # 315틱 = 계획 420 s
 BATTERY = os.environ.get("PIBT_BATTERY", "0") not in ("0", "", "false")

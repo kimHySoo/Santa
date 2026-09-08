@@ -4,10 +4,16 @@
 #
 # ── 시연 (기본) ─────────────────────────────────────────────
 #   bash run.sh                          wppl 12대
-#   bash run.sh --planner pibt_h         ★ 촬영 + 영상까지 자동. 약 37분
+#   bash run.sh --planner pibt_h         화면(WebRTC)으로 본다
 #
-#   화면(WebRTC)으로 보면서 스크린샷을 찍고, 끝나면 mp4 로 조립한다.
-#   Ctrl-C 로 끊어도 그 시점까지의 프레임으로 영상을 만든다.
+#   ★ 이 스크립트는 **녹화하지 않는다.** SHOT_* 를 export 하지만 live_pibt.py 는
+#     PIBT_SHOT_* 를 읽으므로 접두사가 안 맞는다 — 의도적으로 안 고쳤다.
+#     녹화는 run_record.sh 담당이다:
+#
+#         bash run_record.sh               pibt_h 12대 · 10배속 mp4
+#
+#     (예전 헤더가 "촬영+영상까지 자동, 약 37분"이라고 적어 두어 사람을 속였다.
+#      2026-09-08 정정.)
 #
 # ── 측정 ────────────────────────────────────────────────────
 #   STREAM=0 bash run.sh --planner pibt_h --lite     약 13분 (배속 0.91)

@@ -23,12 +23,19 @@ export PLAN=$W/plan                                  # 궤적 (계획 산출물,
 export OUT=$W/out                                    # kpi · trace · rec · video
 export LOGS=$W/logs
 
-# --- 실행·계획 모듈 ---
-#   amr_driver_v2.py · pibt_core_v2.py · isaac_drive.py · pibt_scene.py 가
-#   $W/path/ 에 있다. 러너는 BASE 와 BASE/path 를 모두 sys.path 에 넣으므로
-#   AMR_BASE 는 그 부모(=W)를 가리키면 된다.
+# --- 실행·계획 모듈 ($W/path/) — **8개다** ---
+#   amr_driver_v2 · pibt_core_v2 · isaac_drive · pibt_scene
+#   lifelong · battery · dispatch · metrics
+#
+#   ★ 4개로 적어 두었다가 틀렸다 (2026-09-08). 현행 pibt_h 는 뒤의 넷을 추가로
+#     import 하므로, 앞의 넷만 올리면 `plan_and_build_lifelong` 이 ImportError
+#     로 죽는다. 배포 목록을 바꿀 때는 reorg_warehouse.sh 와 **함께** 고칠 것.
+#
+#   러너는 BASE 와 BASE/path 를 모두 sys.path 에 넣으므로 AMR_BASE 는 그
+#   부모(=W)를 가리키면 된다.
 export AMR_BASE=$W
 export MODS=$W/path
+export MOD_FILES="amr_driver_v2.py pibt_core_v2.py isaac_drive.py pibt_scene.py lifelong.py battery.py dispatch.py metrics.py"
 
 # --- 스트리밍 ---
 export LAN_IP=$(hostname -I | awk '{print $1}')

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""WPPL — Windowed Parallel PIBT-LNS. **현재 프로덕션 경로.**"""
+"""WPPL — Windowed Parallel PIBT-LNS.
+
+**현행 프로덕션은 `pibt_h` 다** (2026-09-08 정정). 이 계획기는 "WPPL 이 효과가
+있다"를 말하기 위한 축으로 남는다 — 비교군은 `astar`, 동일입력 비교축은 `fms`.
+"""
 import os
 
 from . import default_map

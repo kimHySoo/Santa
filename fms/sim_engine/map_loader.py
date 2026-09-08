@@ -2,9 +2,9 @@
 # ============================================================
 # 맵 로드 + 1.0m 다운샘플 + 스테이션 매핑 — 공용 모듈
 #
-# sim_v1_tasks.py의 로드 규칙(L51-75, L192-206)과 동일. v1은 B-1e 벤치마크
-# 기준선 보존 원칙에 따라 수정하지 않고 중복인 채로 둔다 — 규칙을 바꾸면
-# 반드시 양쪽을 함께 고칠 것.
+# 맵 로드 규칙(장애물 값·다운샘플·스테이션 매핑·통로 행 범위)의 **단일 소스**다 (2026-09-07, S15P21A106-152).
+# sim_v2 커널·스윕·A트랙 build_input·map/check_map_set 이 전부 여기를 import 한다. sim_v1_tasks.py(A* 기준선,
+# 같은 규칙의 복사본)는 레거시 정리에서 삭제됨 — 패리티 값(2384틱/181.2 tasks/h)은 docs 에만 남는다.
 # ============================================================
 import json
 import os
@@ -13,14 +13,14 @@ import numpy as np
 
 CELL_M, OFFSET_M = 1.0, 0.4
 K, OX = round(CELL_M / 0.1), round(OFFSET_M / 0.1)
-# 0.1 m 원본 셀값 중 장애물. sim_v1_tasks.py 의 동일 튜플과 함께 고칠 것.
+# 0.1 m 원본 셀값 중 장애물 (1 구조물·기둥 / 2 랙 / 5 컨베이어 / 6 바닥 파렛트).
 OBSTACLE_VALUES = (1, 2, 5, 6)
 # 랙 사이 세로 통로의 행 범위 [47, 68) — 통로차단(aisle_block) 구간이자 from_theta.VA_ROWS.
-# 2026-09-03 맵 동기화 실측(랙 c±2 막힘 행 47~67). sim_v1_tasks.py 의 동일 슬라이스와 함께 고칠 것.
+# 2026-09-03 맵 동기화 실측(랙 c±2 막힘 행 47~67).
 AISLE_ROWS = (47, 68)
 
 # 공식 맵 폴더 (3_FMS/map). charge_zone.json 이 여기 있고, 맵 세트 수신 후에는
-# occupancy_grid/stations 도 여기서 읽는다 (docs/2026-09-03_맵버전_동기화_결정.md).
+# occupancy_grid/stations 도 여기서 읽는다 (docs/맵_충전존.md#fms-정답지-생성-절차).
 MAP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "map")
 
 
@@ -48,6 +48,12 @@ def load_map(base_dir=None, aisle_block=False):
             c = int((35.1 + 6 * k + OFFSET_M) / CELL_M)
             free[AISLE_ROWS[0]:AISLE_ROWS[1], c - 1:c + 2] = False
 
+    return free, _station_cells(stations, free), stations
+
+
+def _station_cells(stations, free):
+    """스테이션 좌표(m) → 격자 칸: 정확한 칸이 막혀 있으면 상하좌우 첫 free 칸으로 (v1 규칙)."""
+    H, W = free.shape
     st_cell = {}
     for kind, pts in stations.items():
         if kind == "charge_zone":            # 사각형 목록(m) — 스테이션 점이 아님, load_charge_zone 이 읽음
@@ -58,7 +64,7 @@ def load_map(base_dir=None, aisle_block=False):
                 if 0 <= rr < H and 0 <= cc < W and free[rr, cc]:
                     st_cell[f"{kind}[{i}]"] = (rr, cc)
                     break
-    return free, st_cell, stations
+    return st_cell
 
 
 def load_charge_zone(free, map_dir=None):
@@ -117,14 +123,20 @@ def make_homes(free, st_cell, n_robots):
     homes = [st_cell[f"charger[{i}]"] for i in range(6)] + \
             [st_cell[f"charge_q[{i}]"] for i in range(6)]
     if n_robots > len(homes):
-        taken = set(homes) | set(st_cell.values())
-        for r in range(45, min(77, H)):
-            for c in range(100, min(112, W)):
-                if len(homes) >= n_robots:
-                    break
-                if free[r, c] and (r, c) not in taken and \
-                        all(abs(r - hr) + abs(c - hc) >= 2 for hr, hc in homes):
-                    homes.append((r, c))
-                    taken.add((r, c))
+        _fill_extra_homes(free, st_cell, homes, n_robots)
     assert n_robots <= len(homes), f"홈 슬롯 부족: {len(homes)}"
     return homes[:n_robots]
+
+
+def _fill_extra_homes(free, st_cell, homes, n_robots):
+    """12대 초과분: 충전존 인근(행 45~76, 열 100~111) free 칸 중 기존 홈과 맨해튼 ≥ 2 인 칸을 행 우선으로 채운다 (v1 동일)."""
+    H, W = free.shape
+    taken = set(homes) | set(st_cell.values())
+    for r in range(45, min(77, H)):
+        for c in range(100, min(112, W)):
+            if len(homes) >= n_robots:
+                break
+            if free[r, c] and (r, c) not in taken and \
+                    all(abs(r - hr) + abs(c - hc) >= 2 for hr, hc in homes):
+                homes.append((r, c))
+                taken.add((r, c))

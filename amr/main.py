@@ -12,7 +12,7 @@
 모듈을 추가하면 자동으로 잡힌다 — 이 파일은 손대지 않는다.
 
 [왜 이 파일이 있나]
-계획기가 셋(wppl · astar · pibt_h)인데 각각 CLI 인자와 산출물 위치가 달랐다.
+계획기가 넷(wppl · astar · pibt_h · fms)인데 각각 CLI 인자와 산출물 위치가 달랐다.
 어느 게 현행인지, 서버에서 무슨 명령을 쳐야 하는지가 파일 이름에 안 드러나서
 매번 문서를 뒤져야 했다. 여기 한 곳만 보면 되게 한다.
 
@@ -50,8 +50,10 @@ def cmd_list(args):
         print(f"  {name:8s} {m.DESC}")
         print(f"  {'':8s}   실행 {drive}")
         print(f"  {'':8s}   산출 {m.OUT}")
-        if hasattr(m, "GOOD_SEEDS"):
-            print(f"  {'':8s}   완주 확인 시드 {m.GOOD_SEEDS}")
+        # GOOD_SEEDS 는 one-shot 시절 속성이라 지금은 어떤 계획기에도 없다.
+        # lifelong 은 "전원 동시 도착" 조건이 없어 시드를 안 탄다 (2026-09-08).
+        if hasattr(m, "SEEDS_CHECKED"):
+            print(f"  {'':8s}   확인한 시드 {m.SEEDS_CHECKED}")
         print()
     print(f"기본 맵: {P.default_map()}")
 

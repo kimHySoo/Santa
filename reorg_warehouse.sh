@@ -13,8 +13,9 @@
 #   plan/        계획 산출물 (로컬에서 올라옴)
 #   out/ logs/   결과
 #
-# **코드는 안 옮긴다.** amr_driver_v2.py · pibt_core_v2.py · isaac_drive.py ·
-# pibt_scene.py 는 실행 계층이 BASE(=~/khs/wh)에서 import 하므로 최상단에 둔다.
+# **코드는 안 옮긴다.** 실행·계획 모듈 8개(amr_driver_v2 · pibt_core_v2 ·
+# isaac_drive · pibt_scene · lifelong · battery · dispatch · metrics)는 실행
+# 계층이 BASE(=~/khs/wh)에서 import 하므로 path/ 에 둔다.
 # v2/addon/ 의 Isaac 스크립트도 그대로 둔다.
 #
 # [주의] 이미 빌드된 USD 는 창고·로봇 경로를 **절대경로로 박아** 두었다.
@@ -34,10 +35,10 @@ echo "== 서버 폴더 재구성  ($([ $GO = 1 ] && echo 실행 || echo '미리�
 echo
 
 echo "[0] path/ — 실행·계획 모듈"
-say "amr_driver_v2 · pibt_core_v2 · isaac_drive · pibt_scene 을 path/ 로 모은다."
+say "실행·계획 모듈 8개를 path/ 로 모은다 (lifelong·battery·dispatch·metrics 포함)."
 say "러너들은 BASE 와 BASE/path 를 모두 sys.path 에 넣으므로 어느 배치든 돌아간다."
 do_ "mkdir -p path"
-for m in amr_driver_v2.py pibt_core_v2.py isaac_drive.py pibt_scene.py; do
+for m in amr_driver_v2.py pibt_core_v2.py isaac_drive.py pibt_scene.py lifelong.py battery.py dispatch.py metrics.py; do
     if [ -f "$m" ]; then
         do_ "mv '$m' path/"
         say "$m"
@@ -85,8 +86,9 @@ done
 echo
 echo "[4] 검증"
 if [ "$GO" = 1 ]; then
-    for f in path/amr_driver_v2.py path/pibt_core_v2.py path/isaac_drive.py path/pibt_scene.py \
-             warehouse/scene/warehouse_scene.usd warehouse/map/obstacle_mask.npy \
+    for f in $(for m in amr_driver_v2.py pibt_core_v2.py isaac_drive.py pibt_scene.py lifelong.py battery.py dispatch.py metrics.py; do echo "path/$m"; done) \
+             warehouse/scene/warehouse_scene.usd \
+             warehouse/map/obstacle_mask.npy warehouse/map/occupancy_grid.npy \
              warehouse/robots/iwhub/iw_hub.usd; do
         [ -e "$f" ] && say "OK   $f" || say "★ 없음 $f"
     done

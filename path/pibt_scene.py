@@ -8,7 +8,9 @@
 양쪽이 반드시 일치한다.
 
 [의존]
-numpy · pibt_core_v2 · isaac_drive 만 쓴다. config/grid 를 import 하지 않는
+numpy · pibt_core_v2 · isaac_drive 를 쓰고, 통로차단 규칙 때문에 config 도 읽는다
+(82행. 예전에 "config/grid 를 import 하지 않는다"고 적었으나 사실이 아니다 —
+2026-09-08 정정). grid 는 여전히 안 쓰는
 이유는 서버에 올릴 파일 수를 줄이기 위해서다 (4개면 된다).
 
 [격자]
