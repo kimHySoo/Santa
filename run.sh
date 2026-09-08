@@ -75,7 +75,7 @@ else
     echo "[run] 촬영 -> $SHOTS"
     echo "[run]   stride ${SHOT_STRIDE}스텝 · ${SHOT_FPS}fps · $SHOT_EXT"
     echo "[run]   예상: sim 730초 -> 약 $((43800 / SHOT_STRIDE))장 -> $((43800 / SHOT_STRIDE / SHOT_FPS))초 영상"
-    df -h --output=avail "$OUT" 2>$HOME/khs/venv/bin/activate | tail -1 \
+    df -h --output=avail "$OUT" 2>/dev/null | tail -1 \
         | sed 's/^/[run]   남은 디스크: /'
 fi
 
@@ -87,16 +87,16 @@ assemble() {
     [ "${VIDEO:-1}" = "1" ] || { echo "[run] VIDEO=0 — 조립 건너뜀. 프레임: $SHOTS"; return 0; }
 
     local n
-    n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>$HOME/khs/venv/bin/activate | wc -l)
+    n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
     echo
     echo "[run] ── 영상 조립 ─────────────────────────────"
     if [ "$n" -eq 0 ]; then
         echo "[run] 프레임이 없습니다. 로그에서 '캡처 N장 · 실패 M회' 를 확인하세요."
         echo "[run]   verify_start 를 통과해야 촬영이 시작됩니다."
-        rmdir "$SHOTS" 2>$HOME/khs/venv/bin/activate
+        rmdir "$SHOTS" 2>/dev/null
         return 0
     fi
-    if ! command -v ffmpeg >$HOME/khs/venv/bin/activate 2>&1; then
+    if ! command -v ffmpeg >/dev/null 2>&1; then
         echo "[run] ffmpeg 이 없습니다. 프레임 ${n}장은 여기 있습니다:"
         echo "[run]   $SHOTS"
         return 0
@@ -110,7 +110,7 @@ assemble() {
         echo
         echo "[run] ✔ $MP4"
         echo "[run]   길이 $((n / SHOT_FPS))초 · 프레임 ${n}장"
-        du -sh "$MP4" "$SHOTS" 2>$HOME/khs/venv/bin/activate | sed 's/^/[run]   /'
+        du -sh "$MP4" "$SHOTS" 2>/dev/null | sed 's/^/[run]   /'
         echo "[run]   프레임을 지우려면:  rm -rf $SHOTS"
     else
         echo "[run] ★ ffmpeg 실패. 프레임은 $SHOTS 에 남아 있습니다."
