@@ -178,6 +178,11 @@ SHOT_STRIDE = max(1, int(os.environ.get("PIBT_SHOT_STRIDE", "20")))
 SHOT_EXT = os.environ.get("PIBT_SHOT_EXT", "png")      # png | jpg
 SHOT_FPS = int(os.environ.get("PIBT_SHOT_FPS", "30"))  # 조립 fps (배속 계산용)
 
+# --- 렌더 빈도 (patch_render_rate.py) ---------------------------------
+#   물리 dt 는 그대로 두고 렌더만 1/RENDER_EVERY 로 줄인다.
+#   1 이면 아무것도 건드리지 않는다 (기존 동작과 완전히 같다).
+RENDER_EVERY = max(1, int(os.environ.get("PIBT_RENDER_EVERY", "1")))
+
 state = {"sub": None, "fleet": None, "n": 0, "t": 0.0, "done": False,
          "vp": None, "shots": 0, "shot_fail": 0}
 
@@ -417,6 +422,93 @@ def _shot_report():
                   f"-c:v libx264 -pix_fmt yuv420p -crf 20 ../demo.mp4")
 
 
+
+def _quit(code=0):
+    """완주·중단 뒤 Kit 앱을 종료한다 (patch_autoquit.py).
+
+    `state["done"] = True` 는 tick 만 멈춘다. 앱은 계속 돌면서 GPU 를 쥐고,
+    로그를 쓰고, stdout 버퍼를 플러시하지 않는다. 여기서 실제로 끝낸다.
+
+    멱등이다 — 물리 콜백이 계속 불려도 한 번만 요청한다.
+    """
+    if state.get("quitting"):
+        return
+    state["quitting"] = True
+    if _os.environ.get("PIBT_AUTOQUIT", "1") in ("0", "", "false", "False"):
+        carb.log_warn("[pibt] PIBT_AUTOQUIT=0 — 앱을 종료하지 않는다 "
+                      "(GPU·로그를 계속 점유한다)")
+        return
+    try:
+        state["sub"] = None                      # 물리 콜백 해지
+    except Exception:
+        pass
+    try:
+        import omni.kit.app
+        omni.kit.app.get_app().post_quit(int(code))
+        carb.log_warn("[pibt] 앱 종료 요청 (post_quit)")
+    except Exception as e:
+        carb.log_error(f"[pibt] 종료 요청 실패: {e!r} "
+                       "— 수동으로 끊어야 한다 (pkill -u $USER -f isaacsim)")
+
+
+def _setup_render_rate():
+    """렌더 빈도를 낮춘다. 물리 dt 는 건드리지 않는다. (patch_render.py)
+
+    ★ **주행 시작 직전**(물리 콜백 구독 앞)에서 불러야 한다. 이 파일에는
+      프레임 수로 세는 대기가 여섯 군데 있고 전부 1프레임=1/60초를 가정한다.
+      `tl.play()` 앞에서 켜면 probe 가 0.7초 대신 14초를 달려 물리 상태가
+      달라진다 (실측: probe 0.0737 -> 0.1542, 캐스터 부호 반전).
+
+    ★ `minFrameRate` 를 같이 내려야 한다. `maxSubSteps ≈ timeStepsPerSecond
+      / minFrameRate` 이므로, 기본(30)이면 서브스텝이 2 로 잘린다.
+    """
+    if RENDER_EVERY <= 1:
+        return
+    phys_dt = 1.0 / 60.0
+    loop_dt = float(RENDER_EVERY) / 60.0
+    rate = 1.0 / loop_dt
+    lines = []
+
+    try:
+        from isaacsim.core.simulation_manager import SimulationManager
+        SimulationManager.setup_simulation(dt=phys_dt)
+        lines.append(f"SimulationManager.setup_simulation(dt={phys_dt:.6f}) OK")
+    except Exception as e:
+        lines.append(f"★ SimulationManager 실패: {e!r}")
+
+    try:
+        import carb.settings
+        _s = carb.settings.get_settings()
+        # set_dt 는 rateLimit 이 켜져 있을 때 rateLimitFrequency 를 쓴다
+        _s.set_bool("/app/runLoops/main/rateLimitEnabled", True)
+        _s.set_float("/persistent/simulation/minFrameRate", float(rate))
+        lines.append(f"minFrameRate = {rate:g}  ->  되읽음 "
+                     f"{_s.get('/persistent/simulation/minFrameRate')}"
+                     f"   (maxSubSteps ≈ {60.0 / rate:.0f})")
+    except Exception as e:
+        lines.append(f"★ carb.settings 실패: {e!r}")
+
+    try:
+        from isaacsim.core.rendering_manager import RenderingManager
+        RenderingManager.set_dt(loop_dt)
+        try:
+            back = RenderingManager.get_dt()
+        except Exception:
+            back = "?"
+        lines.append(f"RenderingManager.set_dt({loop_dt:.4f}) -> get_dt {back}")
+    except Exception as e:
+        lines.append(f"★ RenderingManager 실패: {e!r}")
+
+    carb.log_warn(f"[pibt] 렌더 빈도 1/{RENDER_EVERY} — 주행 시작 직전 적용 "
+                  f"(루프 {rate:g} fps · 물리 60 Hz)")
+    for ln in lines:
+        carb.log_warn("[pibt]   " + ln)
+    carb.log_warn("[pibt]   ★ 확인 순서: probe 지문(0.07370/+3.032) -> "
+                  f"steps=600@t=10s -> steps/frame {RENDER_EVERY} 근처")
+    if SHOTS and SHOT_STRIDE != RENDER_EVERY:
+        carb.log_warn(f"[pibt]   ★ SHOT_STRIDE({SHOT_STRIDE}) != "
+                      f"RENDER_EVERY({RENDER_EVERY}) — 맞추는 것이 좋다")
+
 def _on_physics(dt):
     """물리 스텝 콜백.
 
@@ -426,6 +518,8 @@ def _on_physics(dt):
     """
     f = state["fleet"]
     if f is None or state["done"]:
+        if state["done"]:
+            _quit()          # ★ tick 만 멈추지 말고 앱을 끝낸다
         return
     try:
         _tick(f, dt)
@@ -486,7 +580,26 @@ def _tick(f, dt):
         return
 
     if state["n"] % 600 == 0:
+        # 렌더가 실제로 줄었는지 여기서 보인다 (patch_render_rate.py)
+        #   첫 줄은 기준점을 잡는 줄이라 값이 없다 (- 로 찍힌다).
+        #   두 번째 줄부터 (스텝 증분)/(프레임 증분) 이다.
+        _fr = 0
+        try:
+            import omni.kit.app as _ka
+            _fr = int(_ka.get_app().get_update_number())
+        except Exception:
+            pass
+        _spf = None
+        if _fr:
+            if state.get("f0") is None:
+                state["f0"], state["n0"] = _fr, state["n"]
+            else:
+                _df = _fr - int(state["f0"])
+                if _df > 0:
+                    _spf = (state["n"] - int(state["n0"])) / _df
         carb.log_warn(f"[pibt] t={state['t']:.0f}s  {f.stats}"
+                      + (f"  steps/frame {_spf:.1f}" if _spf is not None
+                         else ("  steps/frame -" if _fr else ""))
                       + (f"  타임아웃 {len(f.timeouts)}" if f.timeouts else "")
                       + (f"  캡처 {state['shots']}장" if SHOTS else ""))
         for m in f.timeouts[-2:]:
@@ -531,6 +644,48 @@ async def _run():
         carb.log_warn(f"[pibt] camera: {e}")
 
     # --- 계획 (Isaac 불필요, 순수 numpy — 로컬과 같은 시드면 같은 결과) ---
+    import os as _os
+
+    # --- 경량 모드 (patch_lite.py 삽입) ---
+    #
+    # `main.py` 는 `--lite` 에 대해 env["LIVE_LITE"]="1" 을 넘기는데, 이 파일이
+    # 그것을 읽지 않아 **pibt 경로에서 --lite 가 조용히 무시되고 있었다.**
+    #
+    # MakeInvisible() 은 렌더만 끄고 CollisionAPI 는 건드리지 않는다.
+    # -> 물리 결과가 전혀 바뀌지 않는다. 겹침 0 · 완주 검증은 그대로 유효하다.
+    #    시연 : --lite 없이 (랙이 보여야 한다)
+    #    측정 : --lite 로  (렌더 비중을 재는 유일한 수단)
+    if _os.environ.get("LIVE_LITE", "0") not in ("0", "", "false", "False"):
+        _groups = [g.strip() for g in _os.environ.get(
+            "LIVE_LITE_HIDE",
+            "racks,cargo_b,office_furniture,markings,pallets,anchors"
+        ).split(",") if g.strip()]
+        try:
+            import omni.usd as _ou
+            from pxr import UsdGeom as _UG
+            _st = _ou.get_context().get_stage()
+            _hid, _miss = [], []
+            for _g in _groups:
+                for _base in ("/World/Warehouse", "/World"):
+                    _pr = _st.GetPrimAtPath(_base + "/" + _g)
+                    if _pr and _pr.IsValid():
+                        _UG.Imageable(_pr).MakeInvisible()
+                        _hid.append(_g)
+                        break
+                else:
+                    _miss.append(_g)
+            carb.log_warn("[pibt] 경량 모드 ON — 숨김 %d개 그룹: %s"
+                          % (len(_hid), ", ".join(_hid)))
+            carb.log_warn("[pibt]   물리는 동일 (충돌 유지). 시연 영상용으로 쓰지 말 것")
+            if _miss:
+                carb.log_warn("[pibt]   ★ 못 찾은 그룹: %s — 이름을 확인하세요"
+                              % ", ".join(_miss))
+            if not _hid:
+                carb.log_warn("[pibt]   ★ 숨긴 것이 없다 — 측정값이 무의미하다")
+        except Exception as _e:
+            carb.log_error("[pibt] 경량 모드 실패: %r" % (_e,))
+    # --- 경량 모드 끝 ---
+
     import pibt_scene as PS
     from isaac_drive import (DifferentialDriver, FleetController, plan_and_build,
                              plan_and_build_lifelong)
@@ -747,6 +902,8 @@ async def _run():
     #   영상에 들어가면 안 된다 (그 70초는 볼 것이 없다).
     state["vp"] = _shot_setup()
 
+    # ★ 여기서 켠다 — 위의 프레임 수 기반 대기들이 끝난 뒤여야 한다
+    _setup_render_rate()
     state["sub"] = omni.physx.get_physx_interface() \
         .subscribe_physics_step_events(_on_physics)
     carb.log_warn(f"[pibt] READY — {len(drivers)}대 ADG 주행 시작 (시간표 없음)")

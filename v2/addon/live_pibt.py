@@ -434,7 +434,7 @@ def _quit(code=0):
     if state.get("quitting"):
         return
     state["quitting"] = True
-    if _os.environ.get("PIBT_AUTOQUIT", "1") in ("0", "", "false", "False"):
+    if os.environ.get("PIBT_AUTOQUIT", "1") in ("0", "", "false", "False"):
         carb.log_warn("[pibt] PIBT_AUTOQUIT=0 — 앱을 종료하지 않는다 "
                       "(GPU·로그를 계속 점유한다)")
         return
@@ -452,49 +452,55 @@ def _quit(code=0):
 
 
 def _setup_render_rate():
-    """렌더 빈도를 낮춘다. 물리 dt 는 건드리지 않는다.
+    """렌더 빈도를 낮춘다. 물리 dt 는 건드리지 않는다. (patch_fix.py 적용) (patch_render.py)
 
-    `tl.play()` **앞에서** 불러야 한다. 쓴 값을 되읽어 찍으므로, 키 이름이
-    맞지 않으면 로그에서 바로 보인다.
+    ★ **주행 시작 직전**(물리 콜백 구독 앞)에서 불러야 한다. 이 파일에는
+      프레임 수로 세는 대기가 여섯 군데 있고 전부 1프레임=1/60초를 가정한다.
+      `tl.play()` 앞에서 켜면 probe 가 0.7초 대신 14초를 달려 물리 상태가
+      달라진다 (실측: probe 0.0737 -> 0.1542, 캐스터 부호 반전).
+
+    ★ `minFrameRate` 를 같이 내려야 한다. `maxSubSteps ≈ timeStepsPerSecond
+      / minFrameRate` 이므로, 기본(30)이면 서브스텝이 2 로 잘린다.
     """
     if RENDER_EVERY <= 1:
         return
-    rate = 60.0 / RENDER_EVERY
+    phys_dt = 1.0 / 60.0
+    loop_dt = float(RENDER_EVERY) / 60.0
+    rate = 1.0 / loop_dt
+    lines = []
+
     try:
         import carb.settings
-        s = carb.settings.get_settings()
+        _s = carb.settings.get_settings()
+        # set_dt 는 rateLimit 이 켜져 있을 때 rateLimitFrequency 를 쓴다
+        _s.set_bool("/app/runLoops/main/rateLimitEnabled", True)
+        _s.set_float("/persistent/simulation/minFrameRate", float(rate))
+        lines.append(f"minFrameRate = {rate:g}  ->  되읽음 "
+                     f"{_s.get('/persistent/simulation/minFrameRate')}"
+                     f"   (maxSubSteps ≈ {60.0 / rate:.0f})")
     except Exception as e:
-        carb.log_error(f"[pibt] 렌더 빈도: carb.settings 실패 {e!r}")
-        return
+        lines.append(f"★ carb.settings 실패: {e!r}")
 
-    # 버전에 따라 키가 다를 수 있어 후보를 모두 쓴다. 되읽어 확인한다.
-    wrote = []
-    for key, val in (
-        ("/app/player/useFixedTimeStepping", True),
-        ("/app/player/timeStepsPerSecond", float(rate)),
-        ("/persistent/simulation/minFrameRate", float(rate)),
-        ("/app/runLoops/main/rateLimitEnabled", False),
-    ):
+    try:
+        from isaacsim.core.rendering_manager import RenderingManager
+        RenderingManager.set_dt(loop_dt)
         try:
-            if isinstance(val, bool):
-                s.set_bool(key, val)
-            else:
-                s.set_float(key, val)
-            wrote.append((key, val, s.get(key)))
-        except Exception as e:
-            wrote.append((key, val, f"실패 {e!r}"))
+            back = RenderingManager.get_dt()
+        except Exception:
+            back = "?"
+        lines.append(f"RenderingManager.set_dt({loop_dt:.4f}) -> get_dt {back}")
+    except Exception as e:
+        lines.append(f"★ RenderingManager 실패: {e!r}")
 
-    carb.log_warn(f"[pibt] 렌더 빈도 1/{RENDER_EVERY} 요청 "
-                  f"(앱 {rate:g} fps · 물리 60 Hz 유지)")
-    for k, v, back in wrote:
-        carb.log_warn(f"[pibt]   {k} = {v}  ->  되읽음 {back}")
-    carb.log_warn("[pibt]   ★ 주기 로그의 steps/frame 이 "
-                  f"{RENDER_EVERY} 근처여야 적용된 것이다. "
-                  "1 이면 무시된 것이니 되돌릴 것")
+    carb.log_warn(f"[pibt] 렌더 빈도 1/{RENDER_EVERY} — 주행 시작 직전 적용 "
+                  f"(루프 {rate:g} fps · 물리 60 Hz)")
+    for ln in lines:
+        carb.log_warn("[pibt]   " + ln)
+    carb.log_warn("[pibt]   ★ 확인 순서: probe 지문(0.07370/+3.032) -> "
+                  f"steps=600@t=10s -> steps/frame {RENDER_EVERY} 근처")
     if SHOTS and SHOT_STRIDE != RENDER_EVERY:
         carb.log_warn(f"[pibt]   ★ SHOT_STRIDE({SHOT_STRIDE}) != "
-                      f"RENDER_EVERY({RENDER_EVERY}) — 같은 프레임을 여러 번 "
-                      "찍거나 갱신 없는 프레임을 찍을 수 있다. 맞추는 것이 좋다")
+                      f"RENDER_EVERY({RENDER_EVERY}) — 맞추는 것이 좋다")
 
 def _on_physics(dt):
     """물리 스텝 콜백.
@@ -631,7 +637,6 @@ async def _run():
         carb.log_warn(f"[pibt] camera: {e}")
 
     # --- 계획 (Isaac 불필요, 순수 numpy — 로컬과 같은 시드면 같은 결과) ---
-    import os as _os
 
     # --- 경량 모드 (patch_lite.py 삽입) ---
     #
@@ -642,8 +647,8 @@ async def _run():
     # -> 물리 결과가 전혀 바뀌지 않는다. 겹침 0 · 완주 검증은 그대로 유효하다.
     #    시연 : --lite 없이 (랙이 보여야 한다)
     #    측정 : --lite 로  (렌더 비중을 재는 유일한 수단)
-    if _os.environ.get("LIVE_LITE", "0") not in ("0", "", "false", "False"):
-        _groups = [g.strip() for g in _os.environ.get(
+    if os.environ.get("LIVE_LITE", "0") not in ("0", "", "false", "False"):
+        _groups = [g.strip() for g in os.environ.get(
             "LIVE_LITE_HIDE",
             "racks,cargo_b,office_furniture,markings,pallets,anchors"
         ).split(",") if g.strip()]
@@ -745,7 +750,6 @@ async def _run():
     from isaacsim.core.utils.types import ArticulationAction
     import numpy as np
 
-    _setup_render_rate()      # ★ play 앞에서. 물리 dt 는 안 바뀐다
     tl = omni.timeline.get_timeline_interface()
     tl.set_current_time(0.0)
     tl.play()
@@ -890,6 +894,8 @@ async def _run():
     #   영상에 들어가면 안 된다 (그 70초는 볼 것이 없다).
     state["vp"] = _shot_setup()
 
+    # ★ 여기서 켠다 — 위의 프레임 수 기반 대기들이 끝난 뒤여야 한다
+    _setup_render_rate()
     state["sub"] = omni.physx.get_physx_interface() \
         .subscribe_physics_step_events(_on_physics)
     carb.log_warn(f"[pibt] READY — {len(drivers)}대 ADG 주행 시작 (시간표 없음)")

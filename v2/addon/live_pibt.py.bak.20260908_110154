@@ -178,6 +178,11 @@ SHOT_STRIDE = max(1, int(os.environ.get("PIBT_SHOT_STRIDE", "20")))
 SHOT_EXT = os.environ.get("PIBT_SHOT_EXT", "png")      # png | jpg
 SHOT_FPS = int(os.environ.get("PIBT_SHOT_FPS", "30"))  # 조립 fps (배속 계산용)
 
+# --- 렌더 빈도 (patch_render_rate.py) ---------------------------------
+#   물리 dt 는 그대로 두고 렌더만 1/RENDER_EVERY 로 줄인다.
+#   1 이면 아무것도 건드리지 않는다 (기존 동작과 완전히 같다).
+RENDER_EVERY = max(1, int(os.environ.get("PIBT_RENDER_EVERY", "1")))
+
 state = {"sub": None, "fleet": None, "n": 0, "t": 0.0, "done": False,
          "vp": None, "shots": 0, "shot_fail": 0}
 
@@ -417,6 +422,93 @@ def _shot_report():
                   f"-c:v libx264 -pix_fmt yuv420p -crf 20 ../demo.mp4")
 
 
+
+def _quit(code=0):
+    """완주·중단 뒤 Kit 앱을 종료한다 (patch_autoquit.py).
+
+    `state["done"] = True` 는 tick 만 멈춘다. 앱은 계속 돌면서 GPU 를 쥐고,
+    로그를 쓰고, stdout 버퍼를 플러시하지 않는다. 여기서 실제로 끝낸다.
+
+    멱등이다 — 물리 콜백이 계속 불려도 한 번만 요청한다.
+    """
+    if state.get("quitting"):
+        return
+    state["quitting"] = True
+    if _os.environ.get("PIBT_AUTOQUIT", "1") in ("0", "", "false", "False"):
+        carb.log_warn("[pibt] PIBT_AUTOQUIT=0 — 앱을 종료하지 않는다 "
+                      "(GPU·로그를 계속 점유한다)")
+        return
+    try:
+        state["sub"] = None                      # 물리 콜백 해지
+    except Exception:
+        pass
+    try:
+        import omni.kit.app
+        omni.kit.app.get_app().post_quit(int(code))
+        carb.log_warn("[pibt] 앱 종료 요청 (post_quit)")
+    except Exception as e:
+        carb.log_error(f"[pibt] 종료 요청 실패: {e!r} "
+                       "— 수동으로 끊어야 한다 (pkill -u $USER -f isaacsim)")
+
+
+def _setup_render_rate():
+    """렌더 빈도를 낮춘다. 물리 dt 는 건드리지 않는다. (patch_render_rate2)
+
+    `tl.play()` **앞에서** 불러야 한다. 아티큘레이션 생성보다도 앞이다 —
+    `setup_simulation` 이 물리 뷰를 다시 만들 수 있다.
+
+    v1(carb 설정 직접 쓰기)은 실패했다. 값은 되읽혔는데 효과가 없었고,
+    `rateLimitEnabled=False` 는 방향이 반대였다 (set_dt 는 true 를 전제한다).
+    """
+    if RENDER_EVERY <= 1:
+        return
+    phys_dt = 1.0 / 60.0
+    loop_dt = float(RENDER_EVERY) / 60.0
+    lines = []
+
+    # 1) 물리 dt 를 명시적으로 고정한다 (기본도 1/60 이지만 못 박아 둔다)
+    try:
+        from isaacsim.core.simulation_manager import SimulationManager
+        SimulationManager.setup_simulation(dt=phys_dt)
+        lines.append(f"SimulationManager.setup_simulation(dt={phys_dt:.6f}) OK")
+    except Exception as e:
+        lines.append(f"★ SimulationManager 실패: {e!r}")
+
+    # 2) set_dt 의 전제 — rateLimit 이 켜져 있어야 rateLimitFrequency 를 쓴다
+    try:
+        import carb.settings
+        _s = carb.settings.get_settings()
+        _s.set_bool("/app/runLoops/main/rateLimitEnabled", True)
+        lines.append("rateLimitEnabled = True  (set_dt 의 전제)")
+    except Exception as e:
+        lines.append(f"★ rateLimitEnabled 설정 실패: {e!r}")
+
+    # 3) 루프·렌더 dt
+    try:
+        from isaacsim.core.rendering_manager import RenderingManager
+        RenderingManager.set_dt(loop_dt)
+        try:
+            back = RenderingManager.get_dt()
+        except Exception:
+            back = "?"
+        lines.append(f"RenderingManager.set_dt({loop_dt:.4f}) -> get_dt {back}")
+    except Exception as e:
+        lines.append(f"★ RenderingManager 실패: {e!r}")
+
+    carb.log_warn(f"[pibt] 렌더 빈도 1/{RENDER_EVERY} 요청 "
+                  f"(루프 {1.0 / loop_dt:g} fps · 물리 60 Hz 유지)")
+    for ln in lines:
+        carb.log_warn("[pibt]   " + ln)
+    carb.log_warn(f"[pibt]   ★ 주기 로그의 steps/frame 이 {RENDER_EVERY} 근처여야 "
+                  "적용된 것이다. 1 이면 또 무시된 것이니 되돌릴 것")
+    carb.log_warn("[pibt]   ★ steps/sim 이 60.0 을 유지해야 한다 "
+                  "(t=10s 에 steps=600). 깨지면 물리 dt 가 변한 것이다")
+    if SHOTS and SHOT_STRIDE != RENDER_EVERY:
+        carb.log_warn(f"[pibt]   ★ SHOT_STRIDE({SHOT_STRIDE}) != "
+                      f"RENDER_EVERY({RENDER_EVERY}) — 갱신 없는 프레임을 "
+                      "찍거나 같은 프레임을 두 번 찍을 수 있다")
+
+
 def _on_physics(dt):
     """물리 스텝 콜백.
 
@@ -426,6 +518,8 @@ def _on_physics(dt):
     """
     f = state["fleet"]
     if f is None or state["done"]:
+        if state["done"]:
+            _quit()          # ★ tick 만 멈추지 말고 앱을 끝낸다
         return
     try:
         _tick(f, dt)
@@ -486,7 +580,26 @@ def _tick(f, dt):
         return
 
     if state["n"] % 600 == 0:
+        # 렌더가 실제로 줄었는지 여기서 보인다 (patch_render_rate.py)
+        #   첫 줄은 기준점을 잡는 줄이라 값이 없다 (- 로 찍힌다).
+        #   두 번째 줄부터 (스텝 증분)/(프레임 증분) 이다.
+        _fr = 0
+        try:
+            import omni.kit.app as _ka
+            _fr = int(_ka.get_app().get_update_number())
+        except Exception:
+            pass
+        _spf = None
+        if _fr:
+            if state.get("f0") is None:
+                state["f0"], state["n0"] = _fr, state["n"]
+            else:
+                _df = _fr - int(state["f0"])
+                if _df > 0:
+                    _spf = (state["n"] - int(state["n0"])) / _df
         carb.log_warn(f"[pibt] t={state['t']:.0f}s  {f.stats}"
+                      + (f"  steps/frame {_spf:.1f}" if _spf is not None
+                         else ("  steps/frame -" if _fr else ""))
                       + (f"  타임아웃 {len(f.timeouts)}" if f.timeouts else "")
                       + (f"  캡처 {state['shots']}장" if SHOTS else ""))
         for m in f.timeouts[-2:]:
@@ -645,6 +758,7 @@ async def _run():
     from isaacsim.core.utils.types import ArticulationAction
     import numpy as np
 
+    _setup_render_rate()      # ★ play 앞에서. 물리 dt 는 안 바뀐다
     tl = omni.timeline.get_timeline_interface()
     tl.set_current_time(0.0)
     tl.play()
