@@ -267,6 +267,31 @@ def add_asset(stage, path, usd, x, y, z=0.0, rot_z=None, instance=False, scale=N
     return w
 
 
+
+
+# [patch_asset_colliders] 참조 에셋의 내장 콜라이더 끄기
+#   콜라이더 단일 소스는 **격자에서 나온 투명 박스**다. 참조 에셋(ConveyorBelt_A08,
+#   사무실 가구)이 자기 콜라이더를 들고 오면 격자 밖으로 삐져나온다 —
+#   A08 은 폭 1.15 m 인데 v6.0 격자 밴드가 0.90 m 라 양쪽 0.125 m 씩 나온다
+#   (2026-09-09 실측: conveyors 켜짐 82 = 격자 32 + A08 50).
+#   `packing_table` 이 이미 같은 처리를 한다 (실측 꺼짐 156).
+#   ★ 반드시 저장 전에 해야 파일에 남는다. `[4b]` 는 저장 뒤라 안 남는다.
+def kill_asset_colliders(root_path):
+    """`root_path` 하위 콜라이더를 모두 끈다. 끈 개수를 돌려준다.
+
+    인스턴스 프록시에는 저작할 수 없으므로 인스턴스화된 것(화물 등)은 대상이 아니다.
+    """
+    n = 0
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        return 0
+    for _p in Usd.PrimRange(root):
+        if _p.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(_p).CreateCollisionEnabledAttr(False)
+            n += 1
+    return n
+
+
 import zlib
 
 
@@ -483,7 +508,9 @@ for i, (usd, wx, wy, wz, wr) in enumerate(OFFICE_WALL):
 for i, (px, py) in enumerate(PLANTS):
     add_asset(stage, f"/World/office_furniture/plant_{i}", OPROPS + "SM_Plant01.usd", px, py)
     n_furn += 1
-print(f"[1b] 사무실 인테리어: 바닥 2 + 가구 {n_furn}점")
+_n_off = kill_asset_colliders("/World/office_furniture")
+print(f"[1b] 사무실 인테리어: 바닥 2 + 가구 {n_furn}점 "
+      f"(내장 콜라이더 {_n_off}개 끔 — 콜라이더 단일 소스는 격자다)")
 
 # 2) 컨베이어·작업대 (셀값 5) — rect 중심이 컨베이어 라인 밴드 위인지로 구분.
 #    (폭 기준은 함정: qc 작업대가 컨베이어와 셀이 붙어 그리디 분할되면 0.6m 조각이
@@ -580,7 +607,14 @@ for k in range(1, n_bench + 1):
     for p in Usd.PrimRange(wtab.GetPrim()):
         if p.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr(False)
-print(f"[2] 컨베이어 콜라이더 {n_conv}(투명) + 비주얼 섹션 {n_sec} · 패킹 테이블 {n_bench}(rect {n_tab})")
+# A08 내장 콜라이더 — 폭 1.15 m 가 격자 밴드 0.90 m 밖으로 양쪽 0.125 m 나온다.
+# 측면 여유 0.275 m 의 45%를 먹고, V&V 오검출 1548셀 중 1283셀을 설명한다.
+_n_cv = 0
+for _c in stage.GetPrimAtPath("/World/conveyors").GetChildren():
+    if _c.GetName().startswith("vis"):
+        _n_cv += kill_asset_colliders(_c.GetPath())
+print(f"[2] 컨베이어 콜라이더 {n_conv}(투명) + 비주얼 섹션 {n_sec} "
+      f"(내장 {_n_cv}개 끔) · 패킹 테이블 {n_bench}(rect {n_tab})")
 
 # 2b) 바닥 파렛트 블록 (셀값 6) — 구형 창고 블록 스태킹. 콜라이더는 그리드 rect
 #     그대로(투명, 라이다·플래너 단일 소스), 비주얼은 rect 안에 래핑 파렛트
@@ -852,14 +886,53 @@ print(f"[3e] 도어 드레싱 {n_door}곳 (폐쇄 셔터·하우징·잼 포스�
 #     기하 없음(시각·물리 무관). 이후 프로젝트(재생기·warehouse_sim·FMS)가 좌표를
 #     씬에서 직접 질의하는 표준 통로 — 그리드·씬 이중 관리 방지.
 UsdGeom.Xform.Define(stage, "/World/anchors")
-n_anch = 0
+n_anch = n_zone = 0
+_skipped = []
+
+
+def _anchor(typ, ai, ax, ay, zone=None):
+    """기하 없는 Xform 마커. zone 이면 원 사각형도 속성으로 남긴다."""
+    a = UsdGeom.Xform.Define(stage, f"/World/anchors/{typ}_{ai}")
+    UsdGeom.Xformable(a.GetPrim()).AddTranslateOp().Set(
+        Gf.Vec3d(float(ax), float(ay), 0.0))
+    if zone:
+        for k in ("x0", "y0", "x1", "y1"):
+            a.GetPrim().CreateAttribute(
+                f"zone:{k}", Sdf.ValueTypeNames.Double).Set(float(zone[k]))
+        if "id" in zone:
+            a.GetPrim().CreateAttribute(
+                "zone:id", Sdf.ValueTypeNames.String).Set(str(zone["id"]))
+    return a
+
+
+# [patch_anchors] 좌표 쌍이 아닌 항목은 좌표 쌍으로 언팩하면 죽는다.
+#   FMS 정렬로 `charge_zone` 키가 들어왔는데 값이 사각형 dict 다 (2026-09-09 실측:
+#   `ValueError: too many values to unpack (expected 2)` — 저장 직전에 죽어서
+#   씬이 아예 안 나왔다). 형태를 보고 갈라 처리하고, **건너뛴 것은 찍는다.**
 for typ, pts in stations.items():
-    for ai, (ax, ay) in enumerate(pts):
-        a = UsdGeom.Xform.Define(stage, f"/World/anchors/{typ}_{ai}")
-        UsdGeom.Xformable(a.GetPrim()).AddTranslateOp().Set(
-            Gf.Vec3d(float(ax), float(ay), 0.0))
-        n_anch += 1
-print(f"[3f] 스테이션 앵커 {n_anch}개 (/World/anchors)")
+    if not isinstance(pts, (list, tuple)):
+        _skipped.append(f"{typ} (리스트가 아님: {type(pts).__name__})")
+        continue
+    for ai, pt in enumerate(pts):
+        # (a) 사각형 존 — 중심에 앵커 하나
+        if isinstance(pt, dict) and all(k in pt for k in ("x0", "y0", "x1", "y1")):
+            _anchor(typ, ai, (pt["x0"] + pt["x1"]) / 2.0,
+                    (pt["y0"] + pt["y1"]) / 2.0, zone=pt)
+            n_anch += 1
+            n_zone += 1
+            continue
+        # (b) 좌표 쌍
+        if isinstance(pt, (list, tuple)) and len(pt) == 2:
+            try:
+                _anchor(typ, ai, float(pt[0]), float(pt[1]))
+                n_anch += 1
+                continue
+            except (TypeError, ValueError):
+                pass
+        _skipped.append(f"{typ}[{ai}] = {str(pt)[:60]}")
+print(f"[3f] 스테이션 앵커 {n_anch}개 (존 {n_zone}개 포함) (/World/anchors)")
+for _s in _skipped:
+    print(f"[3f] ★ 앵커를 못 만든 항목: {_s}")
 
 # 4) 저작 저장 → 완성 파일을 컨텍스트로 오픈 (참조 일괄 로딩)
 stage.GetRootLayer().Save()

@@ -16,10 +16,9 @@
 #   SHOT_STRIDE=20   몇 물리스텝마다 한 장 (기본 20)
 #   WATCH_SEC=420    촬영 확인까지 대기 (기본 420초)
 #   ISOLATE=0        GPU 격리 해제 (기본은 CUDA_VISIBLE_DEVICES=$GPU)
-#   FINISH_GRACE=5   `post_quit` 표시 뒤 끊기까지 초 (기본 5, 0 = 즉시)
-#   DONE_GRACE=30    `전원 완주` 만 보이고 post_quit 이 없을 때 (기본 30)
+#   FINISH_GRACE=5   완주(post_quit) 표시 뒤 끊기까지 초 (기본 5, 0 = 즉시)
 #   IDLE_KILL=300    프레임이 이만큼 안 늘면 끝난 것으로 보고 끊는다 (기본 300)
-#   BOOT_WAIT=600    Kit 이 뜨기를 기다리는 한도 (기본 600). 이 안에 안 뜨면 감시를 접는다
+#   MIN_AGE=120      이보다 이른 완주 표시는 무시 (기본 120초 — 부팅만 20초)
 #   SHOT_FPS=30      출력 fps (기본 30)
 #   SHOT_EXT=png     png | jpg
 #   RUN_TAG=이름     출력 폴더·파일 이름 (기본 시각)
@@ -182,7 +181,63 @@ assemble() {
         echo "           -c:v libx264 -pix_fmt yuv420p -crf 20 $MP4"
     fi
 }
-trap assemble EXIT
+# ── 감시 서브셸 정리 — ★ 반드시 trap 안에서 ───────────────
+#   `( ... ) &` 로 띄운 서브셸은 **SIGINT 를 무시한다** (POSIX: 비대화형 셸의
+#   비동기 목록). 그래서 Ctrl-C 를 치면 script·Isaac·이 스크립트는 죽는데 감시
+#   둘은 살아남는다. 살아남은 옛 감시가 자기 옛 폴더(38장)를 300초 세다가
+#   `pkill -f` 로 **다음 런의 Isaac 을 죽였다** (2026-09-08 15:44 실측).
+#   두 가지로 막는다: (1) 여기서 trap 으로 반드시 죽인다,
+#   (2) 감시는 매 회 부모 생존을 확인하고, 죽일 대상도 패턴이 아니라
+#       **자기 script 의 자손**으로 한정한다 (아래 _desc).
+WATCH=""; FINWATCH=""; SCRIPT_PID=""
+cleanup() {
+    [ -n "$WATCH" ]    && kill "$WATCH"    2>/dev/null
+    [ -n "$FINWATCH" ] && kill "$FINWATCH" 2>/dev/null
+    # Ctrl-C 로 들어왔으면 script/Isaac 이 아직 죽는 중일 수 있다. 프레임을 다 쓰고
+    # GPU 를 놓을 때까지 잠깐 기다린 뒤 조립한다 — 안 그러면 ffmpeg 이 쓰는 중인
+    # PNG 를 읽는다.
+    if [ -n "$SCRIPT_PID" ] && kill -0 "$SCRIPT_PID" 2>/dev/null; then
+        _kill_mine INT
+        for _ in $(seq 25); do sleep 1; kill -0 "$SCRIPT_PID" 2>/dev/null || break; done
+        kill -0 "$SCRIPT_PID" 2>/dev/null && { _kill_mine KILL; kill -KILL "$SCRIPT_PID" 2>/dev/null; }
+    fi
+    assemble
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# 자손 PID 나열 (재귀). 패턴 매칭 대신 이걸로 죽인다 — 남의 런·다른 팀을 안 건드린다.
+_desc() {
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null); do
+        echo "$c"; _desc "$c"
+    done
+}
+_kit_alive() {                 # 내 script 의 자손 중 Kit 본체가 있나
+    local p
+    [ -n "$SCRIPT_PID" ] || return 1
+    for p in $(_desc "$SCRIPT_PID"); do
+        case "$(cat /proc/$p/comm 2>/dev/null)" in
+            python*|isaacsim*|kit*) return 0 ;;
+        esac
+    done
+    return 1
+}
+_kill_mine() {                 # $1 = 신호. 내 script 의 자손 전부에게
+    local p
+    for p in $(_desc "$SCRIPT_PID"); do kill "-$1" "$p" 2>/dev/null; done
+}
+_parent_gone() { ! kill -0 "$MAIN_PID" 2>/dev/null; }
+MAIN_PID=$$
+
+# ── 주행을 먼저 띄운다 — 감시가 그 PID 의 자손을 봐야 하므로 ─────────
+# ★ `SHOTS=0` 은 **자식에만** 준다 (이 스크립트의 $SHOTS 는 mkdir·감시·조립이 쓴다).
+#   `run.sh` 는 `SHOTS`/`SHOT_*` 를 export 하는데 `live_pibt.py` 는 `PIBT_*` 를 읽는다
+#   (접두사 불일치, 2026-09-08 확인). `SHOTS=0` 이면 run.sh 가 그 분기를 통째로 건너뛴다.
+# ★ `-f` (flush) — 없으면 `script` 가 typescript 를 블록 버퍼링해서 감시가 읽는
+#   로그가 수 분 늦는다 (2026-09-08 15:13 런에서 90초 경로를 못 잡은 원인).
+script -q -f -e -c "SHOTS=0 bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG" &
+SCRIPT_PID=$!
 
 # ── 촬영이 켜졌는지 확인 ────────────────────────────────────
 #   안 켜진 채로 29분을 버리는 것이 가장 나쁘다.
@@ -193,6 +248,7 @@ trap assemble EXIT
 #     USD 로드 + play 전 프레임 대기까지 합쳐 첫 장까지 5분 넘게 걸린다.
 #     420초로 늘렸다. 그래도 첫 장이 없으면 촬영이 정말 꺼진 것이다.
 ( sleep "$WATCH_SEC"
+  _parent_gone && exit 0                                   # 부모가 죽었으면 나도 끝
   n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
   if [ "$n" -gt 0 ]; then exit 0; fi                       # 촬영 중
   if grep -aq "캡처 ON" "$MYLOG" 2>/dev/null; then exit 0; fi
@@ -204,7 +260,7 @@ trap assemble EXIT
   if [ "$STRICT" = "1" ]; then
       echo "     STRICT=1 이므로 끊습니다 (29분을 버리지 않기 위해)."
       echo "     확인:  grep -a '캡처\\|뷰포트' \"$MYLOG\""
-      pkill -u "$ME" -INT -f "$KITPAT" 2>/dev/null
+      _kill_mine INT
   else
       echo "     STRICT=0 이므로 계속합니다. 영상은 안 나옵니다."
   fi ) &
@@ -223,90 +279,66 @@ WATCH=$!
 #     3. 프레임 정체 — 위 둘을 못 봐도 캡처가 멈추면 주행은 끝난 것이다
 #
 #   ★ typescript 만 믿으면 안 된다 — 즉시 flush 되지 않는다 (이 파일 위쪽 실측).
-KITLOG_DIR="$HOME/.nvidia-omniverse/logs/Kit"
-FINISH_GRACE="${FINISH_GRACE:-5}"     # `post_quit` 뒤 이만큼만 기다린다 (마지막 PNG 비동기 쓰기 몫).
+START_TS=$(date +%s)
+MIN_AGE="${MIN_AGE:-120}"             # 이보다 이른 완주 표시는 믿지 않는다 (부팅만 20초)
+FINISH_GRACE="${FINISH_GRACE:-5}"     # 완주 표시 뒤 이만큼만 기다린다 (마지막 PNG 비동기 쓰기 몫).
                                       # 90초였는데 정상 종료가 성공한 적이 한 번도 없어 줄였다 (2026-09-08).
                                       # 0 으로 주면 즉시 끊는다.
-DONE_GRACE="${DONE_GRACE:-30}"        # `전원 완주` 만 보였을 때. **post_quit 과 같이 두면 안 된다** —
-                                      # 완주는 로봇이 다 도착한 시점이고, 그 뒤에 마지막 캡처와 KPI
-                                      # 쓰기가 남는다. 5초로 끊으면 그것들을 날린다 (2026-09-08).
-BOOT_WAIT="${BOOT_WAIT:-600}"         # Kit 이 뜨기를 기다리는 한도.
-                                      # ★ 이게 없으면 감시가 2초에 죽는다 — `_kit_alive` 는 execvpe
-                                      #   이후에야 참이 되는데, POLL 을 15 -> 2 로 줄이면서 첫 확인이
-                                      #   Isaac 기동보다 앞서게 됐다 (2026-09-08). 자동 종료가 통째로
-                                      #   안 도는 원인이었다.
 IDLE_KILL="${IDLE_KILL:-300}"         # 프레임이 이만큼 안 늘면 끝난 것으로 본다
 POLL=2                                 # 표시 확인 주기. script -f 라 typescript 가 즉시 반영된다
 SLOW_EVERY=7                           # 무거운 확인(Carb 로그 grep · 프레임 세기)은 7회마다 = 약 14초
 
-_kit_alive() {
-    for p in $(pgrep -u "$ME" -f "$KITPAT" 2>/dev/null); do
-        [ "$p" = "$$" ] && continue
-        case "$(cat /proc/$p/comm 2>/dev/null)" in
-            python*|isaacsim*|kit*) return 0 ;;
-        esac
-    done
-    return 1
-}
 
-( quit_at=0; done_at=0; idle=0; prev=-1; slow=0; n=0
-  seen_kit=0                                     # Kit 이 **한 번이라도** 잡혔나
-  boot_deadline=$(( $(date +%s) + BOOT_WAIT ))
+( marker_at=0; idle=0; prev=-1; slow=0; n=0
   while sleep "$POLL"; do
-      # ── Kit 이 있나 — "아직 안 떴다" 와 "끝났다" 는 다르다 ──
-      if _kit_alive; then
-          seen_kit=1
-      elif [ "$seen_kit" = 1 ]; then
-          exit 0                                 # 떴다가 사라졌다 = 스스로 잘 끝났다
-      elif [ "$(date +%s)" -ge "$boot_deadline" ]; then
-          exit 0                                 # 한도 안에 안 떴다 = 기동 실패. 감시할 것이 없다
-      else
-          continue                               # 아직 부팅 중 (씬 빌드 + Kit 부팅 + USD 로드)
-      fi
+      _parent_gone && exit 0                     # ★ 부모(run_record)가 죽었으면 나도 끝 — 고아 금지
+      _kit_alive || exit 0                       # 스스로 잘 끝났다
 
-      # ── 매 회(2초): 완주 표시 ────────────────────────────────
-      #   평상시 비용은 grep 한 번이다. 하나라도 걸렸을 때만 둘로 나눠 본다.
-      if [ "$quit_at" = 0 ] || [ "$done_at" = 0 ]; then
-          if grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null; then
-              if [ "$quit_at" = 0 ] && grep -aq "post_quit" "$MYLOG" 2>/dev/null; then
-                  quit_at=$(date +%s)
-              fi
-              if [ "$done_at" = 0 ] && grep -aq "전원 완주" "$MYLOG" 2>/dev/null; then
-                  done_at=$(date +%s)
-              fi
-          fi
+      # ── 매 회(2초): 완주 표시 — 이것만 빠르면 된다 ──────────
+      seen=0
+      if [ "$marker_at" = 0 ]; then
+          grep -aq "post_quit\|전원 완주" "$MYLOG" 2>/dev/null && seen=1
       fi
 
       # ── 7회마다(약 14초): 무거운 확인 ───────────────────────
+      #   ★ 프레임 세기는 표시 게이트도 쓰므로 `n` 이 늦게 갱신되면 첫 표시를
+      #     한 주기 놓친다. 표시를 본 회차에는 즉시 한 번 더 센다 (아래).
       slow=$((slow + 1))
-      if [ "$slow" -ge "$SLOW_EVERY" ]; then
-          slow=0
+      if [ "$seen" = 1 ] || [ "$slow" -ge "$SLOW_EVERY" ]; then
+          [ "$slow" -ge "$SLOW_EVERY" ] && slow=0
           n=$(find "$SHOTS" -maxdepth 1 -name "f_*.$SHOT_EXT" 2>/dev/null | wc -l)
-          if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
-              idle=$((idle + POLL * SLOW_EVERY))
-          else
-              idle=0
-          fi
-          prev="$n"
-      fi
-      if [ "$quit_at" = 0 ] && [ "$slow" = 0 ] && [ -d "$KITLOG_DIR" ]; then
-          # 무버퍼 로그. 최근 10분 안에 쓰인 파일만 본다 (런당 124 MB, 전수는 비싸다).
-          # ★ `for L in $(ls ...)` 는 폴더 이름에 공백이 있으면 경로가 깨져 grep 이
-          #   조용히 실패한다 — 2026-09-08 15:13 런에서 표시 경로가 안 잡힌 원인 후보.
-          #   find -exec 는 단어 분리를 하지 않는다.
-          if [ -n "$(find "$KITLOG_DIR" -name 'kit_*.log' -mmin -10 \
-                     -exec grep -la "post_quit" {} + 2>/dev/null | head -1)" ]; then
-              quit_at=$(date +%s)
+          if [ "$slow" = 0 ]; then                 # 정주기 회차에서만 정체를 센다
+              if [ "$n" -gt 0 ] && [ "$n" = "$prev" ]; then
+                  idle=$((idle + POLL * SLOW_EVERY))
+              else
+                  idle=0
+              fi
+              prev="$n"
           fi
       fi
+      # ★★ Carb 로그(`~/.nvidia-omniverse/logs/Kit/*/kit_*.log`)는 **보지 않는다.**
+      #   `-mmin -10` 으로 훑었더니 **직전 런의 로그**에 있는 `post_quit` 을 읽고
+      #   부팅 20초에 정상 런을 끊었다 (2026-09-08 23:42 실측: app ready 19.76s 직후).
+      #   그 파일은 이번 런의 것인지 구분되지 않는다. 원래 Carb 로그를 본 이유는
+      #   typescript 가 버퍼링돼 늦어서였는데 그건 `script -f` 로 해결됐다 —
+      #   우회로가 남아서 해가 됐다. typescript 는 이번 런만 담으므로 모호함이 없다.
+
+      # ★ 정상 완주는 **반드시 프레임이 있다.** 프레임 0장에서 온 표시는 이번 런의
+      #   것이 아니거나 촬영이 꺼진 것이다 — 어느 쪽이든 이 경로로 끊지 않는다
+      #   (촬영이 꺼진 경우는 위쪽 WATCH_SEC 감시가 담당한다).
+      if [ "$seen" = 1 ] && [ "$n" -eq 0 ]; then
+          seen=0
+      fi
+      # ★ 부팅만 해도 20초다. 그보다 이른 표시는 믿지 않는다.
+      if [ "$seen" = 1 ] && [ $(( $(date +%s) - START_TS )) -lt "$MIN_AGE" ]; then
+          seen=0
+      fi
+      [ "$seen" = 1 ] && [ "$marker_at" = 0 ] && marker_at=$(date +%s)
 
       why=""
-      if [ "$quit_at" != 0 ] \
-         && [ $(( $(date +%s) - quit_at )) -ge "$FINISH_GRACE" ]; then
-          why="post_quit 뒤 ${FINISH_GRACE}초가 지났는데 프로세스가 남아 있습니다"
-      elif [ "$done_at" != 0 ] \
-           && [ $(( $(date +%s) - done_at )) -ge "$DONE_GRACE" ]; then
-          why="전원 완주 뒤 ${DONE_GRACE}초가 지났는데 post_quit 도 종료도 없습니다"
+      if [ "$marker_at" != 0 ] \
+         && [ $(( $(date +%s) - marker_at )) -ge "$FINISH_GRACE" ]; then
+          why="완주 표시 뒤 ${FINISH_GRACE}초가 지났는데 프로세스가 남아 있습니다"
       elif [ "$idle" -ge "$IDLE_KILL" ]; then
           why="프레임이 ${IDLE_KILL}초 동안 ${n}장에서 안 늘었습니다"
       fi
@@ -320,30 +352,19 @@ _kit_alive() {
       say "$why."
       say "Kit 종료 지연으로 보고 끊습니다 (GLFW 종료 경로 결함, 2026-09-08 실측)."
       say "프레임은 남아 있으니 영상은 그대로 만들어집니다."
-      pkill -u "$ME" -INT -f "$KITPAT" 2>/dev/null
+      _kill_mine INT                             # 내 자손에게만
       for _ in $(seq 20); do sleep 1; _kit_alive || break; done
       if _kit_alive; then
           say "SIGINT 로 안 죽어 SIGKILL 을 보냅니다."
-          pkill -u "$ME" -KILL -f "$KITPAT" 2>/dev/null
+          _kill_mine KILL
       fi
       exit 0
   done ) &
 FINWATCH=$!
 
-# ── 주행 ────────────────────────────────────────────────────
-# ★ `SHOTS=0` 은 **자식에만** 준다 (이 스크립트의 $SHOTS 는 mkdir·감시·조립이 쓴다).
-#   `run.sh` 는 `SHOTS`/`SHOT_*` 를 export 하는데 `live_pibt.py` 는 `PIBT_*` 를 읽는다
-#   (접두사 불일치, 2026-09-08 확인). 그래서 run.sh 의 촬영은 어차피 동작하지 않으면서
-#   빈 폴더를 하나 더 만들고 끝에 "프레임이 없습니다" 를 찍는다 — 조립 섹션이 두 번
-#   나와 헷갈린다. `SHOTS=0` 이면 run.sh 가 그 분기를 통째로 건너뛴다.
-#   촬영은 위에서 export 한 `PIBT_*` 가 담당한다.
-# ★ `-f` (flush) — 없으면 `script` 가 typescript 를 블록 버퍼링해서, 감시가 읽는
-#   로그가 수 분 늦는다. 2026-09-08 15:13 런에서 `post_quit` 표시(90초 경로)를 못 읽고
-#   프레임 정체(300초 경로)로 잡힌 원인. 앞서 "typescript 가 즉시 flush 안 된다"고
-#   실측해 놓고 원인을 안 고쳤던 것.
-script -q -f -e -c "SHOTS=0 bash \"$W/run.sh\" ${ARGS[*]}" "$MYLOG"
+# ── 주행이 끝나기를 기다린다 (script 는 위에서 이미 띄웠다) ──
+wait "$SCRIPT_PID"
 rc=$?
-kill "$WATCH" "$FINWATCH" 2>/dev/null
 echo
 echo "Isaac 종료 (코드 $rc)"
 exit "$rc"
