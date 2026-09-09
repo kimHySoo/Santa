@@ -41,6 +41,21 @@ export MOD_FILES="amr_driver_v2.py pibt_core_v2.py isaac_drive.py pibt_scene.py 
 export LAN_IP=$(hostname -I | awk '{print $1}')
 export GPU=${GPU:-3}
 
+# [patch_gpu_isolate] GPU 격리 — 이 한 줄이 run.sh·run_record.sh·build_scene 전부에 적용된다
+#   `--/renderer/activeGpu=$GPU` 는 **렌더러(Vulkan)만** 묶는다. PhysX/warp 쪽
+#   CUDA 는 보이는 장치마다 primary context 를 만든다 — 실측 2026-09-08 13:03:
+#   GPU0 518 · GPU1 436 · GPU2 436 · GPU3 6449 MiB. 1·2 는 일도 안 하면서
+#   VRAM 을 잡아 다른 팀 문의를 받았다. CUDA_VISIBLE_DEVICES 만이 이걸 막는다.
+#
+#   activeGpu 는 그대로 $GPU — Vulkan 열거는 이 변수를 따르지 않아 인덱스가
+#   안 밀린다 (2026-09-09 실측: GPU3 6479 MiB 작업 · GPU0 6.89 MiB 그래픽만).
+#
+#     GPU=1 bash run.sh ...       다른 GPU
+#     ISOLATE=0 bash run.sh ...   격리 해제 (렌더러가 엉뚱한 장치로 갈 때)
+if [ "${ISOLATE:-1}" = "1" ]; then
+    export CUDA_VISIBLE_DEVICES=$GPU
+fi
+
 mkdir -p "$STAGE" "$PLAN" "$OUT" "$LOGS"
 
 echo "W=$W"
@@ -48,7 +63,7 @@ echo "  입력  SCENE=$(basename $SCENE)  MAP=$(basename $MAP)  ROBOT=$(basename
 echo "  파생  STAGE=$STAGE"
 echo "  계획  PLAN=$PLAN"
 echo "  결과  OUT=$OUT  LOGS=$LOGS"
-echo "  LAN=$LAN_IP  GPU=$GPU"
+echo "  LAN=$LAN_IP  GPU=$GPU  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<격리 해제>}"
 for f in "$SCENE" "$ROBOT" "$MAP/obstacle_mask.npy"; do
     [ -e "$f" ] || echo "  ★ 없음: $f"
 done
