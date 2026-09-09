@@ -1,0 +1,24 @@
+# 줄바꿈 정책 — 저장소에는 항상 LF 로 넣는다.
+#
+# 왜: Windows(로컬 편집)와 Linux 서버(패치·빌드)를 오가며 같은 파일을 고친다.
+# 정책이 없으면 왕복할 때마다 파일 전체가 바뀐 것처럼 보인다 — 실측 2026-09-09,
+# build_scene.py 가 79줄 변경인데 2031줄로 표시됐다. diff 리뷰가 불가능해진다.
+* text=auto eol=lf
+
+# 바이너리 — git 이 줄바꿈을 건드리면 파일이 깨진다.
+*.usd  -text
+*.usda -text
+*.usdc -text
+*.npy  -text
+*.npz  -text
+*.png  -text
+*.jpg  -text
+*.mp4  -text
+*.pgm  -text
+*.dxf  -text
+*.tar.gz -text
+*.etli -text
+
+# 바이너리이면서 diff 가 의미 없는 것 — 로그를 깨끗하게
+*.usd  diff=none
+*.npy  diff=none
