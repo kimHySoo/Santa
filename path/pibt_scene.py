@@ -110,8 +110,60 @@ WHEEL_RADIUS = 0.08          # iw_hub.usd 조인트 저작값
 WHEEL_BASE = 0.5796          # localPos0 = ±0.28963
 
 # 씬 빌더(build_amr_scene_v2.py)와 같은 충전존. 여기서 출발한다.
-CHARGE_ZONE = [(105.5, y) for y in (50, 53, 56, 59, 62, 65)] + \
-              [(107.8, y) for y in (50, 53, 56, 59, 62, 65)]
+# [patch_charge_start] 충전존 시작 슬롯을 좌측 하단부터 일정 간격으로 생성
+#   예전 값은 하드코딩 12칸이었다:
+#       [(105.5, y) for y in (50,53,56,59,62,65)] + [(107.8, y) for ...]
+#   원래 규칙적(x 2.3 · y 3.0)인데 _cell_of 가 1.2 m 격자로 스냅하면서
+#   2셀/3셀로 번갈아 떨어져 불규칙해졌다 (2026-09-09 실측: 49.8·53.4·55.8·
+#   59.4·61.8·65.4). ★ 간격이 pitch 의 배수가 아니면 규칙적일 수 없다.
+#   그래서 슬롯을 **셀 중심 위에서 직접** 만든다.
+#
+#   또 `CHARGE_ZONE[:n]` 이라 n>12 면 starts 가 12개만 담기고 목표 루프의
+#   starts[a] 에서 KeyError 로 죽었다. 이제 존이 허용하는 만큼 나온다.
+CHARGE_RECT = (102.6, 48.0, 108.6, 67.0)   # warehouse/map/charge_zone.json "east"
+CHARGE_LAT = float(os.environ.get("PIBT_PITCH", "1.2"))     # 계획 격자 pitch
+CHARGE_STEP_X = float(os.environ.get("CHARGE_STEP_X", "2.4"))
+CHARGE_STEP_Y = float(os.environ.get("CHARGE_STEP_Y", "2.4"))
+
+
+def charge_slots(rect=None, lat=None, step_x=None, step_y=None):
+    """존 사각형 → 셀 중심 위의 슬롯. **아래 행 좌→우, 그다음 위 행** 순서.
+
+    셀 중심은 `make_geom` 의 origin 규약대로 `lat/2 + lat*k` 다. 슬롯을 그 위에
+    직접 만들므로 `_cell_of` 가 스냅해도 값이 변하지 않는다 — 간격이 정확히
+    유지되는 유일한 방법이다.
+
+    ★ x 간격은 lat 의 2배 이상이어야 한다. PIBT 는 2셀 점유를 쓰고 헤딩이
+      서쪽이므로 로봇이 (r,c) 와 (r,c-1) 을 함께 쓴다. 1셀 간격이면 겹친다.
+    """
+    x0, y0, x1, y1 = rect or CHARGE_RECT
+    lat = lat or CHARGE_LAT
+    sx = step_x if step_x is not None else CHARGE_STEP_X
+    sy = step_y if step_y is not None else CHARGE_STEP_Y
+    org = lat / 2.0
+
+    kx = max(1, int(round(sx / lat)))
+    ky = max(1, int(round(sy / lat)))
+    if kx < 2:
+        raise SystemExit(
+            f"★ CHARGE_STEP_X={sx} 는 pitch({lat}) 의 2배 이상이어야 합니다.\n"
+            f"  PIBT 는 2셀 점유(헤딩 서쪽)라 1셀 간격이면 로봇끼리 겹칩니다.")
+
+    def lat_ks(a, b):
+        k0 = int(-((-(a - org)) // lat))              # ceil, 정수 연산
+        k1 = int((b - org) // lat)
+        return list(range(k0, k1 + 1))
+
+    xs = [org + lat * k for k in lat_ks(x0, x1)][::kx]
+    ys = [org + lat * k for k in lat_ks(y0, y1)][::ky]
+    return [(round(x, 3), round(y, 3)) for y in ys for x in xs]
+
+
+CHARGE_ZONE_LEGACY = [(105.5, y) for y in (50, 53, 56, 59, 62, 65)] + \
+                     [(107.8, y) for y in (50, 53, 56, 59, 62, 65)]
+CHARGE_ZONE = (CHARGE_ZONE_LEGACY
+               if os.environ.get("CHARGE_START", "auto").lower() == "legacy"
+               else charge_slots())
 GOAL_CATS = ["packing", "consol", "handoff", "aisle_buf", "inbound_buf"]
 
 
@@ -290,6 +342,67 @@ def station_cells(free, geom, map_dir, cats=None):
     return out
 
 
+# [patch_charge_start2] 시작 칸 배정 — 한 곳으로 모은다 (oneshot·lifelong 공용)
+#   예전에는 pick_start_goal(oneshot)과 pick_starts(lifelong)가 따로 배정해서
+#   경로에 따라 결과가 달랐다. 2026-09-09 실측: lifelong 쪽이 막힌 슬롯을
+#   _nearest_free 로 밀어 robot 5 가 격자 밖 (41,89) 에 섰다.
+def _assign_slots(free, geom, n, verbose=True, tag="scene"):
+    """CHARGE_ZONE 슬롯을 좌측 하단부터 n개 배정한다.
+
+    2패스:
+      1차 — 헤딩 서쪽(3)이 valid 한 슬롯만. 충전존이 동벽이라 로봇은 창고
+            안쪽을 봐야 한다. 그게 안 되는 슬롯(x 108.6 열)은 출발 직후
+            불필요한 회전을 만든다 (실측: robot 2·8·11 이 h=0 이었다).
+      2차 — 1차로 n 이 안 차면 헤딩 제약을 풀되 **로그로 명시**한다.
+
+    막힌 슬롯은 `_nearest_free` 로 밀지 않고 **건너뛴다** — 밀면 간격이 깨진다.
+    """
+    H, W = free.shape
+
+    def sweep(strict):
+        st, used, skipped = {}, set(), []
+        for (x, y) in CHARGE_ZONE:
+            if len(st) >= n:
+                break
+            cell = _cell_of(geom, x, y)
+            if not (0 <= cell[0] < H and 0 <= cell[1] < W) \
+                    or cell in used or not free[cell]:
+                skipped.append((x, y, "격자 밖/점유/막힘"))
+                continue
+            h = _first_valid_heading(free, cell, prefer=[3, 0, 2, 1])
+            if h is None:
+                skipped.append((x, y, "valid 헤딩 없음 (2셀 점유 불가)"))
+                continue
+            if strict and h != 3:
+                skipped.append((x, y, f"서쪽 헤딩 불가 (h={h})"))
+                continue
+            used.add(cell)
+            st[len(st)] = (cell[0], cell[1], h)
+        return st, skipped
+
+    starts, skipped = sweep(True)
+    if len(starts) < n:
+        s2, sk2 = sweep(False)
+        if len(s2) > len(starts):
+            print(f"[{tag}] ★ 서쪽 헤딩만으로는 {len(starts)}대뿐 — 제약을 풀어 "
+                  f"{len(s2)}대로 채웁니다 (출발 직후 회전이 생깁니다)")
+            starts, skipped = s2, sk2
+    if len(starts) < n:
+        raise SystemExit(
+            f"★ 충전존에 {n}대를 놓을 자리가 없습니다 — {len(starts)}대만 가능.\n"
+            f"  슬롯 {len(CHARGE_ZONE)}개 중 {len(skipped)}개를 걸렀습니다:\n  "
+            + "\n  ".join(f"({x:.1f},{y:.1f}) {w}" for x, y, w in skipped[:8])
+            + f"\n  CHARGE_STEP_Y 를 줄이면(예: 1.2) 행이 늘어납니다. "
+              f"CHARGE_STEP_X 는 pitch 의 2배 미만으로 줄일 수 없습니다.")
+    if verbose:
+        _xs = sorted({round(geom.cell_center(s[:2])[0], 1) for s in starts.values()})
+        _ys = sorted({round(geom.cell_center(s[:2])[1], 1) for s in starts.values()})
+        _hs = sorted({s[2] for s in starts.values()})
+        print(f"[{tag}] 충전존 시작 {len(starts)}대 · x {_xs} · y {_ys} · h {_hs}"
+              + (f" · 건너뜀 {len(skipped)}" if skipped else ""))
+    return starts
+
+
 def pick_start_goal(free, geom, n, map_dir, seed=0, verbose=True):
     """충전존에서 출발해 작업 스테이션 하나로 가는 (starts, goals).
 
@@ -299,26 +412,13 @@ def pick_start_goal(free, geom, n, map_dir, seed=0, verbose=True):
     rng = random.Random(seed)
     H, W = free.shape
 
-    # --- 시작: 충전존 12칸을 서로 다른 칸에 배정 ---
-    starts, used = {}, set()
-    for i, (x, y) in enumerate(CHARGE_ZONE[:n]):
-        cell = _cell_of(geom, x, y)
-        if cell in used or not (0 <= cell[0] < H and 0 <= cell[1] < W):
-            cell = None
-        if cell is None or not free[cell]:
-            cell = _nearest_free(free, _cell_of(geom, x, y), used)
-        if cell is None:
-            raise SystemExit(f"충전존 {i} 에 배정할 칸이 없습니다.")
-        # 창고 안쪽(서쪽)을 보게 둔다 — 충전존이 동벽이므로
-        h = _first_valid_heading(free, cell, prefer=[3, 0, 2, 1])
-        if h is None:
-            cell2 = _nearest_free(free, cell, used)
-            h = _first_valid_heading(free, cell2) if cell2 else None
-            if h is None:
-                raise SystemExit(f"충전존 {i}: valid 한 헤딩이 없습니다.")
-            cell = cell2
-        used.add(cell)
-        starts[i] = (cell[0], cell[1], h)
+    # [patch_charge_start] 시작: 충전존 슬롯을 좌측 하단부터, 막힌 것은 **건너뛴다**
+    #   예전에는 막힌 슬롯을 `_nearest_free` 로 옆으로 밀었다. 그러면 자리는
+    #   찾지만 **간격이 깨진다.** 기둥(x=104.1 · y 56~58)이 걸리는 슬롯은
+    #   비우고 다음 슬롯으로 간다 — 순서는 규칙적이고 자리만 빈다.
+    #   부족하면 조용히 줄이지 않고 중단한다.
+    # [patch_charge_start2] 배정을 헬퍼로 (lifelong 과 같은 규칙)
+    starts = _assign_slots(free, geom, n, verbose=verbose)
 
     # --- 목표: 작업 스테이션 중 도달 가능한 칸 ---
     st = load_stations(map_dir)
@@ -407,25 +507,11 @@ def traj_json(geom, history, pitch):
 
 def pick_starts(free, geom, n, verbose=True):
     """충전존 n칸에 로봇을 세운다. **목표는 뽑지 않는다** — lifelong 은 배차가 준다."""
-    H, W = free.shape
-    starts, used = {}, set()
-    for i, (x, y) in enumerate(CHARGE_ZONE[:n]):
-        cell = _cell_of(geom, x, y)
-        if cell in used or not (0 <= cell[0] < H and 0 <= cell[1] < W) or not free[cell]:
-            cell = _nearest_free(free, _cell_of(geom, x, y), used)
-        if cell is None:
-            raise SystemExit(f"충전존 {i} 에 배정할 칸이 없습니다.")
-        h = _first_valid_heading(free, cell, prefer=[3, 0, 2, 1])
-        if h is None:
-            cell2 = _nearest_free(free, cell, used)
-            h = _first_valid_heading(free, cell2) if cell2 else None
-            if h is None:
-                raise SystemExit(f"충전존 {i}: valid 한 헤딩이 없습니다.")
-            cell = cell2
-        used.add(cell)
-        starts[i] = (cell[0], cell[1], h)
-        if verbose:
-            print(f"[scene]   robot {i}: cell {cell} h={h}")
+    # [patch_charge_start2] oneshot 과 같은 배정 규칙을 쓴다 — 경로에 따라 달라지면 안 된다
+    starts = _assign_slots(free, geom, n, verbose=verbose)
+    if verbose:
+        for i in sorted(starts):
+            print(f"[scene]   robot {i}: cell {starts[i][:2]} h={starts[i][2]}")
     return starts
 
 

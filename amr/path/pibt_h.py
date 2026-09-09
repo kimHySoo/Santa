@@ -75,7 +75,11 @@ def launch(n=12):
     #  자세 대입은 replay_wppl / render_video_wppl 쪽 얘기다. 2026-09-08 정정)
     return Launch(
         "live_pibt.py",
-        env=[("PIBT_SEED", str(SEED)), ("PIBT_PITCH", str(PITCH)),
+        # [patch_record_n_fix] PIBT_N 을 여기서 넣는다 — `--n` 을 단일 소스로.
+        #   예전에는 이 목록에 PIBT_N 이 없어서, `--n 1` 만 주면 씬은 1대인데
+        #   live_pibt.py:162 가 기본값 12로 읽어 어긋났다 (2026-09-09).
+        env=[("PIBT_N", str(n)),
+             ("PIBT_SEED", str(SEED)), ("PIBT_PITCH", str(PITCH)),
              ("PIBT_STAGE", "$STAGE/" + USD % n), ("PIBT_MAP", "$MAP"),
              ("PIBT_MODE", MODE), ("PIBT_HORIZON", str(HORIZON)),
              ("PIBT_BATTERY", "1" if BATTERY else "0"),

@@ -73,8 +73,51 @@ fi
 SHOTS="$OUT/shots_$TAG"
 MP4="$OUT/demo_$TAG.mp4"
 MYLOG="$LOGS/record_$TAG.log"
+# [patch_record_n] 첫 인자가 순수 정수면 로봇 대수로 먹는다
+#   bash run_record.sh 20 --rebuild  →  PIBT_N=20, run.sh 로는 --rebuild 만 간다
+#   대수를 안 주면 환경변수 PIBT_N, 그것도 없으면 12.
+if [ $# -ge 1 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+    PIBT_N="$1"; shift
+fi
+PIBT_N="${PIBT_N:-12}"
+if [ "$PIBT_N" -lt 1 ] 2>/dev/null; then
+    echo "★ 대수는 1 이상의 정수여야 합니다: $PIBT_N" >&2; exit 1
+fi
+export PIBT_N
+
+# [patch_record_n] 계획과 대수가 일치해야 한다 — 계획 디렉터리 이름에 대수가 박혀 있다.
+#   안 맞으면 35초 부팅하고 계획 로드까지 간 뒤에야 죽는다. 0초에 막는다.
+# [patch_record_n_fix] 계획 디렉터리는 0 패딩이다 — pibt_h.py 의 f"fleet_{n:02d}"
+#   실측: ls plan/traj_pibt_h/ → fleet_01  fleet_12
+PLAN_DIR="$PLAN/traj_pibt_h/fleet_$(printf '%02d' "$PIBT_N")"
+if [ ! -d "$PLAN_DIR" ] && [ "${REPLAN:-0}" = "1" ]; then
+    echo "── 계획 생성 (PIBT_N=$PIBT_N) ──────────────────────"
+# [patch_record_n_fix] `--n` 을 넘겨야 한다. main.py:164 의 default 는 12다.
+    ( cd "$W" && python amr/main.py plan --planner pibt_h --n "$PIBT_N" ) || exit 1
+    cp -a "$W/v2/traj_pibt_h/." "$PLAN/traj_pibt_h/" || exit 1
+    echo "── 계획 완료 ───────────────────────────────────────"
+fi
+if [ ! -d "$PLAN_DIR" ] && [ "${SKIP_PLAN_CHECK:-0}" != "1" ]; then
+    echo "★ ${PIBT_N}대 계획이 없습니다: $PLAN_DIR" >&2
+    echo "  먼저:  python amr/main.py plan --planner pibt_h --n $PIBT_N" >&2
+    echo "         cp -a v2/traj_pibt_h/. plan/traj_pibt_h/" >&2
+    echo "  또는:  REPLAN=1 bash run_record.sh $PIBT_N" >&2
+    echo "  (검사만 끄려면 SKIP_PLAN_CHECK=1 — 계획이 없으면 주행이 실패합니다)" >&2
+    exit 1
+fi
+
 ARGS=("$@")
 [ ${#ARGS[@]} -eq 0 ] && ARGS=(--planner pibt_h)
+
+# [patch_record_n_fix] `--n` 을 run.sh -> main.py run 까지 넘긴다
+#   pibt_h.py:launch(n) 이 PIBT_STAGE="$STAGE/"+USD%n 을 쓴다 — 씬 USD 가
+#   대수별이다. main.py run 이 씬 빌드까지 하므로(run.sh:49) --n 이 거기까지
+#   가야 stage/pibt0N.usd 가 만들어진다. export PIBT_N 은 live_pibt.py 용이고,
+#   둘 다 필요하다.
+case " ${ARGS[*]} " in
+    *" --n "*) ;;                       # 사용자가 직접 줬으면 그대로 둔다
+    *) ARGS+=(--n "$PIBT_N") ;;
+esac
 
 # ── 들어오면 안 되는 조합 거부 ──────────────────────────────
 for a in "${ARGS[@]}"; do
@@ -107,6 +150,16 @@ EXPSEC=$(awk -v n="$EXPN" -v f="$SHOT_FPS" 'BEGIN{printf "%d", n/f}')
 echo "════════════════════════════════════════════════════"
 echo " run_record  $TAG"
 echo "  인자        ${ARGS[*]}"
+# [patch_record_n] 플래그가 걸렸는지 로그로 증명한다 (규칙 1번)
+echo "  대수        ${PIBT_N}대"
+echo "  계획        $PLAN_DIR"
+if [ "$PIBT_N" -gt 16 ]; then
+    echo "  ※ 충전존의 서쪽헤딩 슬롯이 2.4 m 간격에서 16개입니다."
+    echo "    ${PIBT_N}대면 CHARGE_STEP_Y=1.2 로 계획해야 할 수 있습니다."
+fi
+if [ "$PIBT_N" != "12" ]; then
+    echo "  ※ 아래 '예상' 줄은 12대 기준(43,800스텝)이라 부정확합니다."
+fi
 echo "  프레임      $SHOTS"
 echo "  영상        $MP4"
 echo "  로그        $MYLOG"

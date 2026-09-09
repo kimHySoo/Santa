@@ -440,6 +440,12 @@ def _quit(code=0):
         carb.log_warn("[pibt] PIBT_AUTOQUIT=0 — 앱을 종료하지 않는다 "
                       "(GPU·로그를 계속 점유한다)")
         return
+    # [patch_pibt_record] ★ post_quit 전에 저장한다 — 앱이 죽으면 기회가 없다.
+    #   state["quitting"] 가드 뒤이므로 정확히 한 번만 실행된다.
+    try:
+        _rec_save(state.get("rec"), STAGE)
+    except Exception as e:
+        carb.log_error(f"[pibt] 자세 기록 저장 중 예외: {e!r}")
     try:
         state["sub"] = None                      # 물리 콜백 해지
     except Exception:
@@ -504,6 +510,125 @@ def _setup_render_rate():
         carb.log_warn(f"[pibt]   ★ SHOT_STRIDE({SHOT_STRIDE}) != "
                       f"RENDER_EVERY({RENDER_EVERY}) — 맞추는 것이 좋다")
 
+
+# [patch_pibt_record] 자세 기록 (오프라인 렌더용) — NPZ 계약은 headless_wppl.py:386 과 동일
+#   왜: 녹화가 뷰포트 스샷이라 STREAM=1 강제 → 50.51 ms/step(36.9분).
+#   헤드리스로 자세만 기록하면 20.3분, 렌더는 2,190프레임만 별도 패스.
+#   PIBT_RENDER_EVERY>1 이 물리 뷰를 무효화해 막힌 것을 파이프라인으로 우회한다.
+#
+#     STREAM=0 PIBT_RECORD=out/rec_pibt12.npz bash run.sh --planner pibt_h
+#     PIBT_RECORD_HZ=30   기록 주기 (기본 30 Hz)
+def _rec_setup(drivers, arts):
+    """기록을 준비한다. 켜지지 않으면 None 을 돌려준다 (그 뒤로 아무 일도 안 한다)."""
+    path = os.environ.get("PIBT_RECORD", "").strip()
+    if not path:
+        return None
+    try:
+        hz = float(os.environ.get("PIBT_RECORD_HZ", "30"))
+        if hz <= 0:
+            raise ValueError(f"PIBT_RECORD_HZ={hz}")
+        # [patch_pibt_record_flush] 주기 저장 — Ctrl-C 로 죽어도 그 시점까지 남는다
+        #   `_quit()` 안에만 저장을 두면 완주·자동종료 때만 남는다. 2026-09-09 실측:
+        #   Ctrl-C 로 `script` 세션째 죽어 NPZ 가 아예 안 생겼다 (프레임은 남았다).
+        flush = float(os.environ.get("PIBT_RECORD_FLUSH", "60"))
+        path = os.path.abspath(os.path.expanduser(path))
+        # ★ np.savez_compressed 는 확장자가 없으면 `.npz` 를 붙인다. 이름을 미리
+        #   맞춰두지 않으면 아래 os.replace 가 엉뚱한 경로를 찾는다.
+        if not path.endswith(".npz"):
+            path += ".npz"
+        # 키가 곧 인덱스다 — 렌더러가 /World/Robots/amr_{i} 를 i 순서로 잡는다.
+        try:
+            keys = sorted(drivers, key=lambda k: int(k))
+        except (TypeError, ValueError):
+            keys = sorted(drivers, key=str)
+        rec = {"path": path, "hz": hz, "next": 0.0, "keys": keys,
+               "drivers": drivers, "arts": arts,
+               "t": [], "pose": [], "alt": [], "off": False,
+               "flush": flush, "flush_next": flush if flush > 0 else float("inf"),
+               "nflush": 0}
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        carb.log_warn(f"[pibt] 자세 기록 ON: {path}  {hz:g} Hz · "
+                      f"로봇 {len(keys)}대 · 주기저장 "
+                      f"{('%g초' % flush) if flush > 0 else '없음'}")
+        return rec
+    except Exception as e:
+        carb.log_error(f"[pibt] 자세 기록 준비 실패 — 기록 없이 진행합니다: {e!r}")
+        return None
+
+
+# [patch_pibt_record_flush] 원자적 쓰기 — .tmp 에 쓰고 replace. 쓰는 중에 죽어도 이전 파일이 온전하다.
+def _rec_write(rec, tag):
+    import numpy as _np
+    tmp = rec["path"] + ".tmp"
+    _np.savez_compressed(
+        tmp,
+        t=_np.asarray(rec["t"], dtype=_np.float32),
+        pose=_np.asarray(rec["pose"], dtype=_np.float32),
+        pose_alt=_np.asarray(rec["alt"], dtype=_np.float32),
+        stage=_np.array(str(rec.get("stage", ""))))
+    os.replace(tmp + ".npz", rec["path"])          # savez 가 .npz 를 붙인다
+    carb.log_warn(f"[pibt] 자세 기록 {tag}: {len(rec['t'])} 프레임 · "
+                  f"{rec['t'][-1]:.1f} s → {rec['path']}")
+
+
+def _rec_sample(rec, t_sim):
+    """시뮬 시각 기준으로 샘플한다. 실패하면 스스로 꺼진다."""
+    if rec is None or rec["off"] or t_sim < rec["next"]:
+        return
+    rec["next"] += 1.0 / rec["hz"]
+    try:
+        import math as _m
+        row_p, row_a = [], []
+        for a in rec["keys"]:
+            # 1순위 — 링크 프레임. 렌더러가 쓰는 prim op 에 가장 가깝다.
+            pos, quat = rec["arts"][a].get_world_pose()
+            qw, qx, qy, qz = (float(quat[0]), float(quat[1]),
+                              float(quat[2]), float(quat[3]))   # wxyz (:782 규약)
+            yaw = _m.atan2(2.0 * (qw * qz + qx * qy),
+                           1.0 - 2.0 * (qy * qy + qz * qz))
+            row_p.append((float(pos[0]), float(pos[1]), yaw))
+            # 2순위 — 축 중심. prim 과 1.03 m 차이가 있다고 알려져 있다.
+            ap = rec["drivers"][a].axle_pose()
+            row_a.append((float(ap[0]), float(ap[1]), float(ap[2])))
+        rec["t"].append(float(t_sim))
+        rec["pose"].append(row_p)
+        rec["alt"].append(row_a)
+    except Exception as e:
+        rec["off"] = True
+        carb.log_error(f"[pibt] ★ 자세 기록 중단 (주행은 계속): {e!r}")
+        return
+
+    # [patch_pibt_record_flush] 주기 저장. dt 가 고정이라 여기서 멈춰도 시뮬 결과는 안 바뀐다.
+    if t_sim >= rec["flush_next"]:
+        rec["flush_next"] = t_sim + rec["flush"]
+        rec["nflush"] += 1
+        try:
+            _rec_write(rec, f"중간저장 #{rec['nflush']}")
+        except Exception as e:
+            rec["off"] = True
+            carb.log_error(f"[pibt] ★ 자세 기록 저장 실패 — 기록 중단: {e!r}")
+
+
+def _rec_save(rec, stage_path):
+    """_quit 에서 한 번 부른다. state["quitting"] 가드가 중복을 막는다.
+
+    주기 저장이 이미 파일을 남겼을 수 있다 — 여기서 마지막 프레임까지 덮어쓴다.
+    """
+    if rec is None or not rec["t"]:
+        if rec is not None:
+            carb.log_warn("[pibt] 자세 기록: 프레임 0장 — 저장하지 않습니다")
+        return
+    rec["stage"] = stage_path
+    try:
+        _rec_write(rec, "최종저장")
+        carb.log_warn(f"[pibt]   렌더:  RENDER_NPZ={rec['path']} "
+                      f"RENDER_OUT=<디렉터리> RENDER_FPS=30 \\")
+        carb.log_warn(f"[pibt]          isaacsim isaacsim.exp.full --no-window "
+                      f"--exec v2/addon/render_video_wppl.py")
+    except Exception as e:
+        carb.log_error(f"[pibt] 자세 기록 저장 실패: {e!r}")
+
+
 def _on_physics(dt):
     """물리 스텝 콜백.
 
@@ -540,6 +665,10 @@ def _tick(f, dt):
     #   f.step 뒤에 둔다 — 이 프레임의 결과를 담아야 한다.
     if state["vp"] is not None and state["n"] % SHOT_STRIDE == 0:
         _shot(state["vp"], state["t"])
+
+    # [patch_pibt_record] 자세 기록 — 스크린샷과 같은 이유로 f.step 뒤에 둔다.
+    #   스텝 수가 아니라 **시뮬 시각**으로 샘플한다 (physics dt 와 무관하게 Hz 유지).
+    _rec_sample(state.get("rec"), state["t"])
 
     # 개루프 — 명령은 나가는데 pose 가 안 변한다. probe 를 통과했는데도 나오면
     # 주행 중에 pose 소스가 끊긴 것이다 (타임라인 정지, prim 재로드 등).
@@ -895,6 +1024,8 @@ async def _run():
     # ★ 캡처는 **주행 시작 직전에** 켠다 — 씬 로드·probe·재정렬 구간이
     #   영상에 들어가면 안 된다 (그 70초는 볼 것이 없다).
     state["vp"] = _shot_setup()
+    # [patch_pibt_record] 기록도 같은 지점에서 — 씬 로드·probe·재정렬이 들어가면 안 된다
+    state["rec"] = _rec_setup(drivers, arts)
 
     # ★ 여기서 켠다 — 위의 프레임 수 기반 대기들이 끝난 뒤여야 한다
     _setup_render_rate()

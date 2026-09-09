@@ -183,6 +183,23 @@ async def _main():
     for _ in range(180):
         await app.next_update_async()
 
+    # [patch_render_fix] 모션블러 OFF — AMR 잔상의 원인 (2026-09-09 실측)
+    #   live_pibt.py:9 · pibt_h.py:83 은 `--/rtx/post/motionblur/enabled=false` 를
+    #   넘긴다. 오프라인 렌더에만 빠져 있어 잔상이 남았다. CLI 플래그로 매번
+    #   넣게 하면 잊으므로(실제로 잊었다) 여기서 끈다.
+    try:
+        import carb.settings
+        _st = carb.settings.get_settings()
+        if os.environ.get("RENDER_MOTIONBLUR", "0") in ("1", "true", "True"):
+            _log("모션블러 ON — 이동체에 잔상이 생깁니다 "
+                 "(RENDER_MOTIONBLUR 를 빼면 꺼집니다)")
+        else:
+            _st.set("/rtx/post/motionblur/enabled", False)
+            _log("모션블러 OFF")
+    except Exception as _e:
+        _log(f"모션블러 설정 실패 — CLI 로 넣으세요: "
+             f"--/rtx/post/motionblur/enabled=false  ({_e!r})", err=True)
+
     if not NPZ or not OUT:
         _log(f"RENDER_NPZ 와 RENDER_OUT 이 필요합니다.")
         app.post_quit(1)
@@ -345,6 +362,15 @@ async def _main():
 
     _log(f"완료 — {n_frames} 프레임, 영상 {n_frames/FPS:.1f}초 (시뮬 {(t_end-START):.0f}초, {SPEED:g}배속)")
     _log(f"다음: bash v2/addon/make_video.sh {out_d} <출력폴더> {FPS:.0f}")
+
+    # [patch_render_fix] 렌더가 끝나면 앱을 끝낸다 — 안 그러면 GPU 를 계속 쥔다.
+    #   오류 경로는 이미 post_quit(1) 을 부른다. 성공 경로만 없었다.
+    #   공유 서버라 남아 있으면 다른 팀에 영향이 간다 (VRAM 점유 문의 이력).
+    if os.environ.get("RENDER_AUTOQUIT", "1") not in ("0", "", "false", "False"):
+        _log("앱 종료 요청 (RENDER_AUTOQUIT=0 이면 남겨둡니다)")
+        omni.kit.app.get_app().post_quit(0)
+    else:
+        _log("RENDER_AUTOQUIT=0 — 앱을 종료하지 않습니다 (GPU 를 계속 점유합니다)")
     app.post_quit(0)
 
 
