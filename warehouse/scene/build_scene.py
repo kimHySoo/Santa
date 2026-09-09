@@ -399,28 +399,24 @@ FRAME_XS = [20.1 + 6 * k for k in range(15)]              # 장변(남·북벽) 
 END_YS = [31.8, 38.0, 51.0, 57.3, 63.6, 83.0]             # 단변(서·동벽), 문 구간 회피
 for x in FRAME_XS:
     for y0 in (25.65, 88.8):                              # 윈드 컬럼 — H형강 (웨브 벽 직교)
+        # 단면을 랙 사이(릿지) 기둥과 통일 — build_scene.py:334 와 같은 값.
+        # 상단 8.8 은 그대로 (처마 9.0 하부. 릿지는 11.0 — 설계 실측이라 다르다).
         add_h_col(stage, add_box, f"/World/steel/c{n_steel}", x, y0 + 0.15, 8.8,
-                  depth_axis="y", D=0.30, B=0.35)
+                  depth_axis="y", D=0.45, B=0.40, tf=0.06, tw=0.06)
         n_steel += 1
 for y in END_YS:
     for x0 in (14.45, 109.5):
         add_h_col(stage, add_box, f"/World/steel/c{n_steel}", x0 + 0.15, y, 8.8,
-                  depth_axis="x", D=0.30, B=0.35)
+                  depth_axis="x", D=0.45, B=0.40, tf=0.06, tw=0.06)
         n_steel += 1
-GIRT_Z = (2.7, 5.0, 7.2, 8.6)                             # 8.6 — 처마 9.0 하부 최상단 거트
-DOOR_FREE_Y = ((26.0, 38.2), (44.8, 70.2), (76.8, 89.0))  # 서·동벽 문 구간 제외 스팬
-for z in GIRT_Z:
-    for y0 in (25.65, 88.95):                             # 남·북벽 전장 거트
-        add_box(stage, f"/World/steel/g{n_steel}", 15.0, y0, 95.0, 0.15,
-                z, z + 0.12, collide=False)
-        n_steel += 1
-    for ya, yb in (DOOR_FREE_Y if z < 6.5 else ((26.0, 89.0),)):
-        for x0 in (14.45, 109.55):
-            add_box(stage, f"/World/steel/g{n_steel}", x0, ya, 0.15, yb - ya,
-                    z, z + 0.12, collide=False)
-            n_steel += 1
+# [patch_wall_steel] 수평 거트 24개 제거 (2026-09-09)
+#   `GIRT_Z = (2.7, 5.0, 7.2, 8.6)` 4단이 95 m 벽을 가로질러, 6 m 간격 기둥 42개와
+#   겹쳐 격자무늬가 생겼다 — "벽의 기둥이 너무 지나친 디자인"이라는 판단으로 제거.
+#   거트만 쓰던 `GIRT_Z`·`DOOR_FREE_Y` 도 함께 지웠다 (죽은 상수를 남기지 않는다).
+#   되살리려면 이 커밋의 .bak 을 보라. 전부 시각 전용이라 주행·플래너 무관.
 bind_mdl(stage, steel_xf, "MI_FrameA_01", MAT_DIR + "/MI_FrameA_01.mdl")
-print(f"[1c] 철골 외피: 윈드 컬럼(H형강)·거트 {n_steel}개")
+print(f"[1c] 철골 외피: 윈드 컬럼(H형강) {n_steel}개 "
+      f"(단면을 릿지 기둥과 통일 · 수평 거트 제거)")
 
 # 1d) 박공지붕 + 상부 철골 (설계 실측: 처마 +9.0 · i=15% · 릿지면 ~+14.5 · 모니터 4.5m)
 n_roof, n_pur = build_roof(stage, add_box=add_box, bind_pbr=bind_pbr, bind_mdl=bind_mdl,
