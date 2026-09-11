@@ -1601,13 +1601,16 @@ def plan_and_build_lifelong(free: np.ndarray, starts: dict[int, State],
                             shifts=("in", "out", "out"),
                             battery: bool = False, docks=(),
                             battery_kw: dict | None = None,
-                            dispatch: str = "fms", **run_kw):
+                            dispatch: str = "fms", zone_cells=(), **run_kw):
     """`lifelong.run_lifelong` 으로 계획하고 ADG 까지 만든다.
 
     `plan_and_build` 과 **같은 것**을 돌려준다. one-shot 과 달리 "전원이
     동시에 목표에 있어야 성공" 조건이 없으므로 `GOOD_SEEDS` 가 필요 없다.
     `extract_actions`·`build_adg`·`sweep_audit` 은 한 줄도 안 고친다 —
     lifelong 의 `history` 형식이 `run_h` 와 같기 때문이다.
+
+    `zone_cells` 는 충전존 복귀 후보 칸이다 (`pibt_scene.charge_zone_cells`).
+    비우면 FREED 가 시작 칸으로 돌아가는 이전 동작 그대로다.
     """
     from lifelong import run_lifelong
 
@@ -1628,7 +1631,7 @@ def plan_and_build_lifelong(free: np.ndarray, starts: dict[int, State],
 
     history, cells_hist, li = run_lifelong(
         free, starts, cells_by_cat, horizon=horizon, seed=seed,
-        order_gap=order_gap, shifts=shifts, **kw)
+        order_gap=order_gap, shifts=shifts, zone_cells=zone_cells, **kw)
 
     chains, order, stats = extract_actions(history, geom)
     adg = build_adg(chains)

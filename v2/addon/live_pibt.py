@@ -169,6 +169,9 @@ MODE = os.environ.get("PIBT_MODE", "oneshot")          # oneshot | lifelong
 HORIZON = int(os.environ.get("PIBT_HORIZON", "315"))   # 315틱 = 계획 420 s
 BATTERY = os.environ.get("PIBT_BATTERY", "0") not in ("0", "", "false")
 DISPATCH = os.environ.get("PIBT_DISPATCH", "fms")      # fms | robot_first
+# 충전존 복귀. 기본 ON — PIBT_ZONE=0 이면 FREED 가 시작 칸으로 돌아가던
+# 2026-09-11 이전 동작으로 되돌아간다 (옛 기준선 재현용).
+ZONE = os.environ.get("PIBT_ZONE", "1") not in ("0", "", "false")
 CAMERA = os.environ.get("PIBT_CAMERA", "/World/Cameras/Cam_Top")
 SPAWN_Z = float(os.environ.get("PIBT_SPAWN_Z", "0.081"))   # build_amr_scene 의 WHEEL_R
 LEFT_IDX, RIGHT_IDX = 0, 1
@@ -833,12 +836,13 @@ async def _run():
                   f"통행가능 {100*free.mean():.1f}%")
     try:
         if MODE == "lifelong":
+            zone = PS.charge_zone_cells(free, geom) if ZONE else ()
             adg, order, history, info = plan_and_build_lifelong(
                 free, starts, goals, geom, horizon=HORIZON, seed=SEED,
-                battery=BATTERY, dispatch=DISPATCH,
+                battery=BATTERY, dispatch=DISPATCH, zone_cells=zone,
                 docks=PS.charge_docks(free, geom) if BATTERY else ())
             carb.log_warn(f"[pibt] lifelong {HORIZON}틱 · 배터리 {BATTERY} "
-                          f"· 배차 {DISPATCH}")
+                          f"· 배차 {DISPATCH} · 존복귀 {ZONE}({len(zone)}칸)")
             import metrics
             for ln in metrics.fmt(info["throughput"]).splitlines():
                 carb.log_warn(ln)

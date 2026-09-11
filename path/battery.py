@@ -17,6 +17,18 @@ S15P21A106-145 커밋에서 읽어낸 불변식 네 가지를 그대로 지킨�
     (2) 초기 SoC 는 따로 뽑는다  -> `soc0_lo/hi` + 전용 rng
     (3) 도크 홈 재선택          -> 충전이 끝나면 그 도크가 새 `home` 이 된다
     (4) 지평(=고정 시간 실행) 워치독 -> `report()["battery_dead_ticks"]`
+    (5) 도크 주차 해제          -> `_unpark_docks` (아래)
+
+★ (5) 는 2026-09-11 에 뒤늦게 이식했다 (FMS kernel/battery.py:61)
+-----------------------------------------------------------------
+(3) 때문에 충전을 마친 로봇은 `home` 이 그 도크가 된다. 그런데 `held` 는 같은
+순간 풀리므로 **다른 로봇이 그 도크를 바로 예약할 수 있다.** 그러면 먼저 있던
+로봇은 goal=home=남의 도크인 채로 남아, 첫 태스크를 받을 때까지 도크 옆을
+맴돌며 진입로를 막는다. FMS 주석이 정확히 이 상황을 적어두고 막아 놨는데
+(2026-09-06 검토) 우리 이식본에는 그 조각이 빠져 있었다.
+
+`zone_cells` 가 있으면 존 빈 칸으로 재선택하고, 없으면 IDLE 로 풀어
+**목표를 지운다** — 목표가 없으면 계급 3 으로 밀려나기만 하고 되돌아오지 않는다.
 
 ★ Kernel 의 `step()` 을 다시 쓰지 않는다
 --------------------------------------
@@ -56,9 +68,9 @@ class BatteryKernel(Kernel):
                  turn_cost=None, turn_ticks=None, *, docks=(), pitch=1.2,
                  endurance_m=400.0, turn_equiv_m=0.30, idle_drain=0.0,
                  charge_ticks=30, detour=1.6, urgent=1.15, max_charging=3,
-                 soc0_lo=0.55, soc0_hi=1.00, seed=0):
+                 soc0_lo=0.55, soc0_hi=1.00, seed=0, zone_cells=()):
         super().__init__(free, starts, stream, edge_cost, wait_cost,
-                         turn_cost, turn_ticks)
+                         turn_cost, turn_ticks, zone_cells=zone_cells)
         self.docks = [tuple(d) for d in docks if free[tuple(d)]]
         if not self.docks:
             raise SystemExit("★ 통행가능한 충전 도크가 없습니다 (docks= 확인)")
@@ -90,7 +102,11 @@ class BatteryKernel(Kernel):
         self.soc_dock, self.soc_task = self._thresholds(stream.cells)
         self.soc_lo = self.soc_task          # 하위호환 별칭
 
-        self.held = set()          # 예약된 도크
+        # 예약된 도크 -> **누가** 잡았는지까지 들고 있는다. `_unpark_docks` 가
+        # "남이 잡은 도크" 를 가려내야 하므로 집합만으로는 부족하다
+        # (FMS 는 `dock_owner` 라는 같은 표를 쓴다).
+        self.dock_owner = {}
+        self.unparked = 0
         self.dist_m = {a: 0.0 for a in starts}
         self.charged = {a: 0 for a in starts}
         self.charge_wait = {a: 0 for a in starts}   # 도크 대기(가동률용)
@@ -103,6 +119,11 @@ class BatteryKernel(Kernel):
         for r in self.rb.values():
             r["resume"] = None
         self.soc_min = dict(self.soc)
+
+    @property
+    def held(self):
+        """예약된 도크 집합 — `dock_owner` 의 뷰. 하위호환용 별칭이다."""
+        return self.dock_owner.keys()
 
     # ------------------------------------------------------------- 임계치
     #
@@ -298,11 +319,58 @@ class BatteryKernel(Kernel):
             if d is None:
                 self.no_dock += 1
                 continue
-            self.held.add(d)
+            self.dock_owner[d] = a
             r["state"], r["goal"] = TO_CHARGE, d
             if self.states[a][:2] == d:
                 r["state"], r["svc"] = CHARGING, self.charge_ticks
+
+        # (c) 도크 주차 해제 — (b) 가 도크를 새로 나눠준 **직후**에 본다.
+        #     FMS 도 _charge_forced 뒤, 작업 배차 앞이다 (core.py:267).
+        self._unpark_docks()
         super().assign(t)
+
+    def _unpark_docks(self):
+        """**남이 잡은 도크**를 노리거나 깔고 앉은 비임무 로봇을 풀어준다.
+
+        FMS battery.py:61 의 이식. (3) 도크 홈 재선택으로 충전을 마친 로봇의
+        `home` 은 그 도크이고, `held` 는 같은 순간 풀리므로 다른 로봇이 곧바로
+        그 도크를 예약할 수 있다. 그대로 두면 먼저 있던 로봇이 첫 태스크를 받을
+        때까지 도크 진입로를 맴돈다.
+
+        FMS 는 `rb["goal"]` 하나로 두 경우를 본다. 우리는 IDLE 의 goal 이 None
+        이라 **나눠서** 본다 — TO_HOME 은 목표 칸으로, IDLE 은 서 있는 칸으로.
+        `home` 으로 보면 안 된다. 존이 꺼져 있을 때 home 을 못 옮기므로 매 틱
+        다시 걸린다.
+
+        존이 있으면 빈 칸으로 재선택한다. 없으면 목표만 지운다 — 목표 없는
+        로봇은 계급 3 이라 밀려나기만 하고 되돌아오지 않으므로 맴돌이가 끝난다.
+        도크를 깔고 앉은 IDLE 은 존이 없으면 손댈 곳이 없고, 충전하러 오는
+        로봇이 계급 1/0 이라 PIBT 가 밀어낸다 (그래서 카운트도 하지 않는다).
+        """
+        for a, r in self.rb.items():
+            if r["state"] == TO_HOME and r["goal"] is not None:
+                target = tuple(r["goal"])
+            elif r["state"] == IDLE:
+                target = tuple(self.states[a][:2])
+            else:
+                continue
+            if self.dock_owner.get(target, a) == a:
+                continue
+            g = self.zone_goal(a) if self.zone else None
+            if g is not None and tuple(g) == target:
+                g = None            # 제자리를 다시 고르면 매 틱 재발화한다
+            if g is None:
+                if r["state"] == TO_HOME:
+                    r["state"], r["goal"] = IDLE, None
+                    self.unparked += 1
+                continue
+            self.unparked += 1
+            self.zone_stats["retargets"] += 1
+            r["goal"] = r["home"] = tuple(g)
+            r["state"] = (IDLE if tuple(self.states[a][:2]) == r["goal"]
+                          else TO_HOME)
+            if r["state"] == IDLE:
+                r["goal"] = None
 
     def _arrive(self, a):
         r = self.rb[a]
@@ -316,7 +384,7 @@ class BatteryKernel(Kernel):
         if r["state"] == CHARGING:
             self.soc[a] = 1.0
             self.charged[a] += 1
-            self.held.discard(tuple(r["goal"]))
+            self.dock_owner.pop(tuple(r["goal"]), None)
             r["home"] = tuple(r["goal"])        # (3) 도크 홈 재선택
             if r.get("resume") is not None:     # 짐을 들고 왔다 -> 드롭 이어서
                 r["task"] = r["resume"]
@@ -357,7 +425,10 @@ class BatteryKernel(Kernel):
     # -------------------------------------------------------------- 보고
     def report(self):
         dead = sum(self.dead_ticks.values())
-        return {
+        # 존 지표(Kernel.report)를 **덮지 않는다** — 전에는 이 dict 가 통째로
+        # 반환값이라 위층 지표가 조용히 사라졌다.
+        out = super().report()
+        out.update({
             "battery": True,
             "battery_soc_dock": round(self.soc_dock, 4),
             "battery_soc_task": round(self.soc_task, 4),
@@ -379,7 +450,9 @@ class BatteryKernel(Kernel):
             "battery_dead_ticks": dead,
             "battery_dead_robots": sum(1 for v in self.dead_ticks.values() if v),
             "battery_no_dock": self.no_dock,
-        }
+            "battery_unparked": self.unparked,   # 남의 도크에서 비켜준 횟수
+        })
+        return out
 
 
 def watchdog(info, strict=True):
