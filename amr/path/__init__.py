@@ -60,6 +60,13 @@ def default_map():
     우리 이름 `handoff`(= FMS 의 `input`+`output`) 하나만 더한 것이다.
     `warehouse/map_fms` 와는 이제 사실상 중복이다.
 
+    ★ "마스크가 동일" 은 2026-09-11 에야 사실이 되었다. 9/8 교체에서
+      `obstacle_mask.npy` 만 빠져 옛 v5.9 판이 남아 있었고, 이 docstring 과
+      `warehouse/map/NOTE.md` 가 둘 다 바뀌었다고 적어 두어 아무도 눈치채지
+      못했다. `obstacle_mask` 를 읽는 A*·WPPL(`amr/make_path/`)은 그동안
+      **옛 창고**로 계획했다 — 새 격자 장애물의 9.73 % 를 모르는 마스크다.
+      경위는 NOTE.md 의 ★ 절. 문서가 파일을 대신 보증하지 않는다는 사례다.
+
     ★ 씬은 아직 안 맞는다. `warehouse_scene.usd` 의 컨베이어·작업대는 옛
       격자(작업 라인 y=33.8·30.2)로 세운 것이라, 지금 계획하면 로봇이 y=40.4
       의 **빈 바닥**으로 간다. 충돌은 없지만 영상으로는 말이 안 된다.
