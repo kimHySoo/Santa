@@ -609,13 +609,20 @@ def setup(map_dir, n, pitch, seed, mode="cross", verbose=True):
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
-    ap.add_argument("--map", default=os.path.join(
-        here, "..", "..", "v2", "upstream", "2_Simulation", "t3_warehouse_map", "map"))
+    # ★ 저장소 안의 `warehouse/map` 이 기본이다 (paths.sh 의 $MAP 과 같은 곳).
+    #   예전 기본값 `../../v2/upstream/2_Simulation/t3_warehouse_map/map` 은
+    #   저장소 **밖**이라 어느 체크아웃에서도 존재하지 않았다 — 인자 없이 돌리면
+    #   "맵 파일을 찾을 수 없습니다" 로 죽는다. t3_amr 사본은 이미 이 형태다.
+    ap.add_argument("--map", default=os.path.join(here, "..", "warehouse", "map"))
     ap.add_argument("--n", type=int, default=12)
     ap.add_argument("--pitch", type=float, default=1.2)
     ap.add_argument("--seed", type=int, default=9)   # 12대에서 완주 확인 (4·9·11·15·17·19·22)
     ap.add_argument("--pool", choices=("strict", "cross", "center"), default="cross")
-    ap.add_argument("--out", default=os.path.join(here, "..", "..", "v2", "traj_pibt_h"))
+    # ★ `..` 하나다. `here` 는 `<저장소>/path` 이므로 `../..` 는 저장소의 **부모**로
+    #   나가 버린다 — 거기엔 v2/ 가 없다. `amr/make_path/` 쪽 기본값들이 `../..`
+    #   인 것을 그대로 베껴 온 자리인데, 그쪽은 한 단계 더 깊어서 같은 표기가
+    #   맞다. 인자 없이 직접 돌릴 때만 드러난다. (2026-09-11)
+    ap.add_argument("--out", default=os.path.join(here, "..", "v2", "traj_pibt_h"))
     ap.add_argument("--plan", action="store_true",
                     help="계획까지 돌려 ADG 를 만들어 본다 (Isaac 불필요)")
     ap.add_argument("--max-steps", type=int, default=400)
