@@ -674,8 +674,64 @@ class AdgRuntime:
         self.tick_s = tick_s        # None 이면 예전 동작 (시각 무시)
         self.clock = 0.0
 
+        # [patch_adg_why] 왜 멈췄나 — ①장애물 ②릴리스바닥 ③ADG선행 귀속
+        #   `blocking()` 이 이미 셋을 구분한다. 여기서 세기만 한다.
+        #   ★ release_time 의 최댓값 = 마지막틱 x tick_s. 그 이후로는 ② 가
+        #     원리적으로 안 걸리므로, 전후를 갈라야 ③ 의 크기가 보인다.
+        import os as _os
+        self._why_on = _os.environ.get("ADG_WHY", "1") not in ("0", "", "false", "False")
+        self._why_every = float(_os.environ.get("ADG_WHY_EVERY", "120"))
+        self._why_next = self._why_every if self._why_on else float("inf")
+        self._why = {}                      # agent -> [obstacle, release, adg]
+        self._why_late = {}                 # 같은 것, release 지평 이후만
+        self._why_horizon = (max((a.tick for a in adg.actions), default=0)
+                             * (tick_s or 0.0))
+
     def advance(self, dt: float) -> None:
         self.clock += float(dt)
+        # [patch_adg_why]
+        if self.clock >= self._why_next:
+            self._why_next += self._why_every
+            self.why_report()
+
+    # [patch_adg_why]
+    def why_report(self) -> None:
+        """막힌 프레임을 원인별로 찍는다. 비율만 의미가 있다."""
+        if not self._why_on or not self._why:
+            return
+        try:
+            import carb
+            say = carb.log_warn
+        except Exception:
+            say = print
+        NM = ("장애물", "릴리스", "ADG선행")
+
+        def block(tbl, title):
+            tot = [0, 0, 0]
+            for v in tbl.values():
+                for i in range(3):
+                    tot[i] += v[i]
+            n = sum(tot)
+            if not n:
+                say(f"[adg-why] {title}: 막힌 프레임 없음")
+                return
+            say(f"[adg-why] {title}  막힘 {n:,} 프레임")
+            say(f"[adg-why]   {'로봇':>4} {'장애물':>8} {'릴리스':>8} "
+                f"{'ADG선행':>8} {'합':>10}")
+            for a in sorted(tbl):
+                v = tbl[a]
+                s = sum(v) or 1
+                say(f"[adg-why]   {a:>4} {v[0]/s*100:7.1f}% {v[1]/s*100:7.1f}% "
+                    f"{v[2]/s*100:7.1f}% {sum(v):>10,}")
+            say(f"[adg-why]   {'전체':>4} {tot[0]/n*100:7.1f}% "
+                f"{tot[1]/n*100:7.1f}% {tot[2]/n*100:7.1f}% {n:>10,}")
+
+        say(f"[adg-why] ── t={self.clock:.0f}s  "
+            f"릴리스 지평 {self._why_horizon:.0f}s ──")
+        block(self._why, "전체 구간")
+        if self.clock > self._why_horizon:
+            block(self._why_late,
+                  f"지평 이후 (t>{self._why_horizon:.0f}s — ② 가 안 걸리는 구간)")
 
     def release_time(self, action: Action) -> float:
         return 0.0 if self.tick_s is None else action.tick * self.tick_s
@@ -685,12 +741,26 @@ class AdgRuntime:
         ch = self.adg.chains[i]
         return ch[k] if k < len(ch) else None
 
+    # [patch_adg_why]
+    def _why_hit(self, action, k: int) -> None:
+        a = getattr(action, "agent", -1)
+        self._why.setdefault(a, [0, 0, 0])[k] += 1
+        if self.clock > self._why_horizon:
+            self._why_late.setdefault(a, [0, 0, 0])[k] += 1
+
     def can_start(self, action: Action) -> bool:
         if action.cells & self.blocked_cells:
+            if self._why_on:
+                self._why_hit(action, 0)
             return False                               # 장애물이 경로 위
         if self.clock + 1e-9 < self.release_time(action):
+            if self._why_on:
+                self._why_hit(action, 1)
             return False                               # 아직 주문이 안 왔다
-        return all(u in self.done for u in self.adg.preds[action.uid])
+        ok = all(u in self.done for u in self.adg.preds[action.uid])
+        if not ok and self._why_on:
+            self._why_hit(action, 2)                   # ADG 선행 대기
+        return ok
 
     def blocking(self, action: Action) -> list[int]:
         """왜 못 시작하는지 — 진단용. 하한 대기 중이면 [-1] 을 앞에 붙인다."""
