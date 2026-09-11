@@ -533,6 +533,35 @@ def charge_docks(free, geom, n=None):
     return out
 
 
+def charge_zone_cells(free, geom, rect=None):
+    """충전존 사각형 안의 **통행가능 칸 전부** — lifelong 의 복귀 목표 후보.
+
+    `charge_docks` 와는 쓰임이 다르다. 도크는 `CHARGE_ZONE` 슬롯(기본 2.4 m
+    간격)만이라 12칸쯤이지만, 복귀 목표는 존 안 아무 빈 칸이나 될 수 있다.
+    FMS 는 `map_loader.zone_cells(free, zone_mask)` 가 이 역할을 한다.
+
+    순서는 FMS 와 같게 **열 오름차순 → 행 오름차순**이다. 존 서쪽(x 작은 쪽)이
+    통로이므로 통로에 가까운 열이 먼저 나온다. `lifelong.zone_goal` 의 동률
+    결정론이 이 순서에 달려 있다 — 바꾸면 같은 시드가 다른 결과를 낸다.
+
+    ★ 헤딩이 하나도 서지 않는 칸은 뺀다. 2칸 점유 모델이라 존 가장자리는 뒤
+      칸이 벽인 경우가 있는데, 그런 칸을 목표로 주면 거리장이 전부 -1 이라
+      로봇이 TO_HOME 으로 영구 정지한다 (`station_cells` 와 같은 이유).
+    """
+    H, W = free.shape
+    x0, y0, x1, y1 = rect or CHARGE_RECT
+    ra, ca = _cell_of(geom, x0, y0)
+    rb, cb = _cell_of(geom, x1, y1)
+    r0, r1 = min(ra, rb), max(ra, rb)
+    c0, c1 = min(ca, cb), max(ca, cb)
+    out = []
+    for c in range(max(0, c0), min(W, c1 + 1)):
+        for r in range(max(0, r0), min(H, r1 + 1)):
+            if free[r, c] and _first_valid_heading(free, (r, c)) is not None:
+                out.append((r, c))
+    return out
+
+
 def setup_lifelong(map_dir, n, pitch, seed, mode="cross", verbose=True):
     """lifelong 용 진입점. 목표 대신 **스테이션 후보 집합**을 돌려준다.
 
@@ -604,6 +633,10 @@ def main():
                     help="배터리·충전 도크")
     ap.add_argument("--dispatch", choices=("fms", "robot_first"), default="fms",
                     help="배차 정책. fms=태스크 순회(기본) / robot_first=로봇 순회")
+    ap.add_argument("--no-zone", dest="zone", action="store_false",
+                    help="충전존 복귀를 끈다 — FREED 가 시작 칸으로 돌아가던 "
+                         "2026-09-11 이전 동작. 옛 기준선 재현용")
+    ap.set_defaults(zone=True)
     args = ap.parse_args()
 
     map_dir = os.path.abspath(args.map)
@@ -632,10 +665,14 @@ def main():
             import metrics
             from isaac_drive import plan_and_build_lifelong
             horizon = args.horizon if args.seconds is None else                 metrics.horizon_for(args.seconds, geom, args.clock)
+            zone = charge_zone_cells(free, geom) if args.zone else ()
+            if args.zone:
+                print(f"[scene] 충전존 복귀 ON · 후보 {len(zone)}칸 "
+                      f"(끄려면 --no-zone)")
             adg, order, history, info = plan_and_build_lifelong(
                 free, starts, goals, geom, horizon=horizon, seed=args.seed,
                 order_gap=args.order_gap, battery=args.battery,
-                dispatch=args.dispatch,
+                dispatch=args.dispatch, zone_cells=zone,
                 docks=charge_docks(free, geom) if args.battery else ())
         else:
             from isaac_drive import plan_and_build
@@ -650,10 +687,16 @@ def main():
             li = info["lifelong"]
             print(f"[scene] 태스크 생성 {li['tasks_spawned']} · "
                   f"완료 {li['tasks_done']} · 대기 {li['waiting']}")
+            if li.get("zone"):
+                print(f"[scene] 존 복귀 대기 {li['zone_wait_steps']}틱 · "
+                      f"재선택 {li['zone_retargets']}회 · "
+                      f"예약무시 {li['zone_degraded']}회 · "
+                      f"동시주차 최대 {li['zone_occ_max']}대")
             if li.get("battery"):
                 print(f"[scene] 충전 {li['battery_charges']}회 · "
                       f"소진 {li['battery_dead_robots']}대 · "
-                      f"최저 SoC {li['battery_soc_min']:.3f}")
+                      f"최저 SoC {li['battery_soc_min']:.3f} · "
+                      f"도크 비켜줌 {li['battery_unparked']}회")
             for w in info.get("battery_warn") or []:
                 print("[scene] ★ " + w)
         with open(os.path.join(d, "trajectories.json"), "w", encoding="utf-8") as f:
