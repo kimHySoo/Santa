@@ -125,7 +125,15 @@ def png_bytes(rgb: np.ndarray) -> bytes:
 
 
 def grid_png(grid: np.ndarray, th: dict) -> str:
-    """점유격자 → data-URI. 1 셀 = 1 픽셀. 행 0 이 이미지 맨 위(= y 최소)."""
+    """점유격자 → data-URI. 1 셀 = 1 픽셀.
+
+    ★ 행을 뒤집어서 굽는다. 격자의 **행 0 은 y 최소**인데(실측 검증:
+      row = floor(y/res) 로 놓으면 궤적이 벽·랙을 밟는 비율이 0.00% 이고,
+      원점을 ±1 m 만 밀어도 9.6% 로 튄다), canvas 의 `drawImage` 는
+      이미지 행 0 을 목적지 사각형의 **위쪽**에 놓는다. 그 사각형 위쪽은
+      y 최대다. 그대로 두면 배경만 상하 반전돼 그려진다 (2026-09-11 버그).
+    """
+    grid = grid[::-1]
     h, w = grid.shape
     rgb = np.empty((h, w, 3), np.uint8)
     rgb[...] = th["g_other"]

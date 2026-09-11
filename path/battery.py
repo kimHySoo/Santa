@@ -39,9 +39,12 @@ S15P21A106-145 커밋에서 읽어낸 불변식 네 가지를 그대로 지킨�
 import numpy as np
 
 import pibt_core_v2 as _pc
+# [patch_battery_names] lifelong 에서 쓰는 이름을 전부 가져온다.
+#   _unpark_docks 를 fms/sim_engine/kernel/battery.py 에서 옮겨 올 때
+#   함수만 오고 import 가 안 와서 TO_HOME 이 NameError 였다 (2026-09-11).
 from lifelong import (
-    CHARGING, FREED, IDLE, TO_CHARGE, TO_CHARGE_HI, TO_DROP, TO_PICK,
-    Kernel,
+    CHARGING, FREED, IDLE, Kernel, TO_CHARGE, TO_CHARGE_HI, TO_DROP,
+    TO_HOME, TO_PICK,
 )
 
 

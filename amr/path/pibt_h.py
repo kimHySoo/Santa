@@ -12,7 +12,7 @@ DRIVE = "adg"
 OUT = "v2/traj_pibt_h"
 SUB = "traj_pibt_h"   # 서버 $PLAN 아래 폴더명
 USD = "pibt%d.usd"
-PITCH = 1.2
+PITCH = 1.0
 SEED = 1
 MODE = "lifelong"          # oneshot | lifelong
 # 배차 정책. fms=태스크 순회(FMS 이식본) / robot_first=로봇 순회
