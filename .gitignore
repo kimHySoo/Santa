@@ -14,7 +14,7 @@ logs/
 *.mp4
 *.png
 *.jpg
-
+docs/
 # --- 원도면·중간 산출물 ---
 *.dxf
 *.pgm
